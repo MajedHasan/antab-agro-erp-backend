@@ -1,10 +1,15 @@
+// src/routes/workorder.routes.ts
+
 import { Router } from "express";
 import { workOrderController } from "../controllers/workorder.controller";
 import { createCrudRouter } from "./crud.routes";
 
 const router = Router();
 
-// Custom Route (optional): generate new Work Order No
+/* =====================================================
+   GENERATE WORK ORDER NO
+===================================================== */
+
 router.get("/generate-no", async (req, res, next) => {
   try {
     const now = new Date();
@@ -12,7 +17,6 @@ router.get("/generate-no", async (req, res, next) => {
     const month = String(now.getMonth() + 1).padStart(2, "0");
 
     const prefix = `WO-${year}${month}-`;
-
     const regex = new RegExp(`^${prefix}(\\d+)$`);
 
     const WorkOrder =
@@ -24,9 +28,12 @@ router.get("/generate-no", async (req, res, next) => {
       .lean();
 
     let nextNumber = 1;
+
     if (existing.length) {
-      const match = existing[0].workOrderNo.match(regex);
-      if (match && match[1]) nextNumber = parseInt(match[1]) + 1;
+      const match = existing[0].workOrderNo?.match(regex);
+      if (match?.[1]) {
+        nextNumber = parseInt(match[1]) + 1;
+      }
     }
 
     res.json({
@@ -37,6 +44,17 @@ router.get("/generate-no", async (req, res, next) => {
     next(err);
   }
 });
+
+/* =====================================================
+   NEW LIFECYCLE ROUTES
+===================================================== */
+
+router.post("/:id/approve", workOrderController.approve);
+router.post("/:id/cancel", workOrderController.cancel);
+
+/* =====================================================
+   CRUD
+===================================================== */
 
 router.use("/", createCrudRouter(workOrderController));
 

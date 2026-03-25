@@ -82,18 +82,48 @@ async function generateDealerCode(doc: any) {
 const attachmentsSchema = new mongoose.Schema(
   {
     required: {
-      bankCheque: { type: String, required: true },
-      tradeLicense: { type: String, required: true },
-      nidCard: { type: String, required: true },
-      informationDeed: { type: String, required: true },
-      pesticideLicense: { type: String, required: true },
+      bankCheque: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Media",
+        required: true,
+      },
+      tradeLicense: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Media",
+        required: true,
+      },
+      nidCard: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Media",
+        required: true,
+      },
+      informationDeed: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Media",
+        required: true,
+      },
+      pesticideLicense: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Media",
+        required: true,
+      },
     },
     optional: {
-      agreements: { type: [String], default: [] },
-      others: { type: [String], default: [] },
+      agreements: [
+        {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Media",
+        },
+      ],
+      others: [
+        {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Media",
+        },
+      ],
     },
   },
-  { _id: false }
+  { _id: false },
 );
 
 const dealerSchema = new mongoose.Schema(
@@ -116,8 +146,14 @@ const dealerSchema = new mongoose.Schema(
     },
 
     type: { type: String, required: true }, // Credit / Cash
-    creditLimit: { type: String, default: "0" },
-    openingBalance: { type: String, default: "0" },
+    creditLimit: { type: Number, default: 0 },
+    openingBalance: { type: Number, default: 0 },
+
+    accountId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Account",
+      unique: true,
+    },
 
     phoneNumber: { type: String, required: true, unique: true },
     email: { type: String },
@@ -129,7 +165,7 @@ const dealerSchema = new mongoose.Schema(
     // warehouse selectable (not required)
     warehouse: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Warehouse",
+      ref: "WarehouseOrFactory",
       required: true,
     },
 
@@ -153,7 +189,7 @@ const dealerSchema = new mongoose.Schema(
       required: true,
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 // Pre-validate hook to generate code if missing

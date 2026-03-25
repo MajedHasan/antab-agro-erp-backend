@@ -16,6 +16,14 @@ const supplierSchema = new Schema(
 
     address: { type: String },
 
+    /* =====================================================
+       🔥 ACCOUNT LINK (IMPORTANT FOR ERP)
+    ====================================================== */
+    accountId: {
+      type: Types.ObjectId,
+      ref: "Account",
+    },
+
     // ---- File Fields (Media IDs) ----
     tinFile: { type: Types.ObjectId, ref: "Media" },
     binFile: { type: Types.ObjectId, ref: "Media" },
@@ -25,7 +33,7 @@ const supplierSchema = new Schema(
     // Soft delete
     deletedAt: { type: Date, default: undefined },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 export const Supplier = model("Supplier", supplierSchema);

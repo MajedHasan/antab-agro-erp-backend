@@ -1,91 +1,103 @@
-// src/models/product.model.js
-import mongoose from "mongoose";
-import slugify from "slugify"; // optional helper - add to your deps (npm i slugify) or replace with simple logic
+// src/models/product.model.ts
+import mongoose, { Schema, Document, Types } from "mongoose";
+import slugify from "slugify";
 
-const Schema = mongoose.Schema;
+export interface IProduct extends Document {
+  name: string;
+  sku: string;
+  code?: string;
+  category?: string;
+  tags?: string[];
+  unit: string;
+  costPrice?: number;
+  salePrice?: number;
+  taxRate?: number;
+  barcode?: string;
+  stock?: number; // optional summary
+  reorderLevel?: number;
+  description?: string;
+  images?: { url: string; alt?: string }[];
+  status?: string;
+  createdBy?: Types.ObjectId;
+  weight?: number;
+  dimensions?: { length?: number; width?: number; height?: number };
+  attributes?: any;
 
-const productImageSchema = new Schema({
-  url: { type: String, required: true },
-  alt: { type: String },
-});
+  accountId?: Types.ObjectId;
 
-const productSchema = new Schema(
-  {
-    // basic identity
-    name: { type: String, required: true, index: true },
-    sku: { type: String, required: true, unique: true, index: true },
-    code: { type: String, index: true }, // optional human-friendly code
+  hasPromotion?: boolean;
+  defaultBonusRule?: {
+    buyQty?: number;
+    getQty?: number;
+  };
+}
 
-    // classification
-    // category: { type: Schema.Types.ObjectId, ref: "Category", required: false }, // optional ref
-    category: { type: String, required: false }, // optional ref
-    tags: [{ type: String }], // free-form tags
-
-    // unit & measurement
-    unit: { type: String, default: "pcs" },
-
-    // pricing
-    costPrice: { type: Number, default: 0 }, // how much it costs you
-    salePrice: { type: Number, default: 0 }, // selling price
-    taxRate: { type: Number, default: 0 }, // percent, e.g. 15
-
-    // inventory
-    barcode: { type: String, index: true },
-    stock: { type: Number, default: 0 },
-    reorderLevel: { type: Number, default: 0 }, // when to re-order
-    warehouses: [
-      {
-        // warehouse: { type: Schema.Types.ObjectId, ref: "Warehouse" },
-        warehouse: { type: String, rquired: false },
-        qty: { type: Number, default: 0 },
-      },
-    ],
-
-    // media & description
-    description: { type: String },
-    images: { type: [productImageSchema], default: [] },
-
-    // status & meta
-    status: { type: String, default: "Active" }, // Active / Inactive / Discontinued
-    createdBy: { type: Schema.Types.ObjectId, ref: "User" },
-
-    // computed helpers
-    weight: { type: Number }, // optional
-    dimensions: {
-      length: Number,
-      width: Number,
-      height: Number,
-    },
-    attributes: { type: Schema.Types.Mixed },
-
-    // you can extend with vendor, manufacturer, etc.
-  },
-  { timestamps: true }
+const productImageSchema = new Schema(
+  { url: { type: String, required: true }, alt: { type: String } },
+  { _id: false },
 );
 
-// pre-save helper: ensure SKU uppercase and code fallback
+const productSchema = new Schema<IProduct>(
+  {
+    name: { type: String, required: true, index: true },
+    sku: { type: String, required: true, unique: true, index: true },
+    code: { type: String, index: true },
+    category: { type: String },
+    tags: [{ type: String }],
+    unit: { type: String, default: "pcs" },
+    costPrice: { type: Number, default: 0 },
+    salePrice: { type: Number, default: 0 },
+    taxRate: { type: Number, default: 0 },
+    barcode: { type: String, index: true },
+    stock: { type: Number, default: 0 },
+    reorderLevel: { type: Number, default: 0 },
+    description: { type: String },
+    images: { type: [productImageSchema], default: [] },
+    status: { type: String, default: "Active" },
+    createdBy: { type: Schema.Types.ObjectId, ref: "User" },
+    weight: { type: Number },
+    dimensions: { length: Number, width: Number, height: Number },
+    attributes: { type: Schema.Types.Mixed },
+
+    accountId: {
+      type: Schema.Types.ObjectId,
+      ref: "Account",
+      index: true,
+    },
+
+    // ADD THIS inside productSchema (do not remove anything else)
+
+    hasPromotion: { type: Boolean, default: false },
+
+    defaultBonusRule: {
+      buyQty: { type: Number, min: 1 },
+      getQty: { type: Number, min: 1 },
+    },
+  },
+  { timestamps: true },
+);
+
 productSchema.pre("save", function (next) {
-  if (this.sku && typeof this.sku === "string") {
-    this.sku = this.sku.trim().toUpperCase();
-  }
-  if (!this.code && this.name) {
-    // try to generate a short code from name if not provided
-    try {
-      // require slugify installed; otherwise simple fallback
-      // npm i slugify
-      this.code = slugify(this.name, { lower: true, strict: true }).slice(
-        0,
-        50
+  if (this.sku) this.sku = this.sku.trim().toUpperCase();
+  if (!this.code && this.name)
+    this.code = slugify(this.name, { lower: true, strict: true }).slice(0, 50);
+  next();
+});
+
+productSchema.pre("validate", function (next) {
+  if (this.defaultBonusRule) {
+    const { buyQty, getQty } = this.defaultBonusRule;
+    if ((buyQty && !getQty) || (!buyQty && getQty)) {
+      return next(
+        new Error("Both buyQty and getQty are required in defaultBonusRule"),
       );
-    } catch (e) {
-      this.code = this.name.toLowerCase().replace(/\s+/g, "-").slice(0, 50);
     }
   }
   next();
 });
 
-// compound index for faster lookups
 productSchema.index({ name: "text", sku: "text", barcode: "text" });
+productSchema.index({ hasPromotion: 1 });
 
 export default mongoose.models.Product ||
   mongoose.model("Product", productSchema);

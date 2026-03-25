@@ -1,75 +1,185 @@
 import mongoose from "mongoose";
 
+/* =========================================================
+   WORK ORDER ITEM
+========================================================= */
 const workOrderItemSchema = new mongoose.Schema(
   {
-    product: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Product",
+    itemType: {
+      type: String,
+      enum: ["RawMaterial", "PackagingItem"],
       required: true,
+    },
+
+    itemId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      refPath: "items.itemType",
     },
 
     description: String,
 
-    quantity: { type: Number, required: true },
-    unit: { type: String },
+    quantity: {
+      type: Number,
+      required: true,
+    },
 
-    unitPrice: { type: Number, required: true, default: 0 },
-    lineTotal: { type: Number, required: true, default: 0 },
+    unit: {
+      type: String,
+    },
 
-    remarks: { type: String },
+    unitPrice: {
+      type: Number,
+      default: 0,
+    },
+
+    lineTotal: {
+      type: Number,
+      default: 0,
+    },
+
+    remarks: String,
   },
-  { _id: true }
+  { _id: true },
 );
 
+/* =========================================================
+   WORK ORDER SCHEMA
+========================================================= */
 const workOrderSchema = new mongoose.Schema(
   {
     workOrderNo: { type: String, unique: true },
 
-    dealer: {
+    supplier: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Dealer",
-      required: true,
-    },
-    warehouse: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Warehouse",
+      ref: "Supplier",
       required: true,
     },
 
-    issueDate: { type: Date, required: true },
-    expectedDeliveryDate: { type: Date },
+    warehouseOrFactory: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "WarehouseOrFactory",
+      required: true,
+    },
 
-    items: { type: [workOrderItemSchema], required: true },
+    issueDate: {
+      type: Date,
+      required: true,
+    },
 
-    // New calculated totals
-    subTotal: { type: Number, default: 0 },
-    taxTotal: { type: Number, default: 0 },
-    grandTotal: { type: Number, default: 0 },
+    expectedDeliveryDate: {
+      type: Date,
+    },
 
+    items: {
+      type: [workOrderItemSchema],
+      required: true,
+    },
+
+    /* =====================================================
+       🔥 TRACK RECEIVED QUANTITY (FROM GR)
+    ====================================================== */
+    receivedQuantity: {
+      type: Number,
+      default: 0,
+    },
+
+    /* =====================================================
+       🔥 PROGRESS (AUTO CALCULATED)
+    ====================================================== */
+    progress: {
+      type: Number,
+      default: 0,
+    },
+
+    /* =====================================================
+       CALCULATED TOTALS
+    ====================================================== */
+    subTotal: {
+      type: Number,
+      default: 0,
+    },
+
+    taxTotal: {
+      type: Number,
+      default: 0,
+    },
+
+    grandTotal: {
+      type: Number,
+      default: 0,
+    },
+
+    /* =====================================================
+       STATUS
+    ====================================================== */
     status: {
       type: String,
-      enum: ["Pending", "Processing", "Completed", "Cancelled"],
+      enum: ["Pending", "Processing", "Approved", "Completed", "Cancelled"],
       default: "Pending",
     },
 
-    notes: { type: String },
+    /* =====================================================
+       🔥 CANCEL / REJECT AUDIT
+    ====================================================== */
 
-    // NEW: Terms & Conditions
-    terms: { type: String },
+    cancelReason: {
+      type: String,
+    },
 
-    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    cancelledBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+
+    cancelledAt: {
+      type: Date,
+    },
+
+    rejectReason: {
+      type: String,
+    },
+
+    rejectedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+
+    rejectedAt: {
+      type: Date,
+    },
+
+    /* =====================================================
+       EXTRA INFO
+    ====================================================== */
+    notes: {
+      type: String,
+    },
+
+    terms: {
+      type: String,
+    },
+
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+
     approvedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: false,
     },
 
-    deletedAt: { type: Date },
+    deletedAt: {
+      type: Date,
+    },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
-// Auto generate Work Order No (existing logic remains)
+/* =========================================================
+   AUTO GENERATE WORK ORDER NO
+========================================================= */
 workOrderSchema.pre("validate", async function (next) {
   try {
     if (this.workOrderNo) return next();
@@ -89,33 +199,60 @@ workOrderSchema.pre("validate", async function (next) {
       .lean();
 
     let nextNumber = 1;
+
     if (existing.length) {
       const match = existing[0].workOrderNo.match(regex);
-      if (match && match[1]) nextNumber = parseInt(match[1]) + 1;
+      if (match && match[1]) {
+        nextNumber = parseInt(match[1]) + 1;
+      }
     }
 
     this.workOrderNo = `${prefix}${String(nextNumber).padStart(4, "0")}`;
+
     next();
   } catch (err) {
     next(err);
   }
 });
 
-// Calculate totals
+/* =========================================================
+   CALCULATE TOTALS + PROGRESS BEFORE SAVE
+========================================================= */
 workOrderSchema.pre("save", function (next) {
   let sub = 0;
 
-  this.items.forEach((item) => {
+  this.items.forEach((item: any) => {
     item.lineTotal = item.quantity * item.unitPrice;
     sub += item.lineTotal;
   });
 
   this.subTotal = sub;
-  this.taxTotal = 0; // future expansion
+  this.taxTotal = 0;
   this.grandTotal = sub;
+
+  /* =====================================================
+     UPDATE PROGRESS BASED ON RECEIVED QUANTITY
+  ====================================================== */
+
+  const totalOrderedQty = this.items.reduce(
+    (acc: number, item: any) => acc + item.quantity,
+    0,
+  );
+
+  if (totalOrderedQty > 0) {
+    this.progress = Math.min(
+      100,
+      Math.round((this.receivedQuantity / totalOrderedQty) * 100),
+    );
+  } else {
+    this.progress = 0;
+  }
 
   next();
 });
 
+/* =========================================================
+   EXPORT
+========================================================= */
 export default mongoose.models.WorkOrder ||
   mongoose.model("WorkOrder", workOrderSchema);
