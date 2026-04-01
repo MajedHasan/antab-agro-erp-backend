@@ -13,6 +13,27 @@ export const workOrderController = {
   //   const workOrders = await base.list(req.params);
   // },
 
+  async create(req: Request, res: Response, next: NextFunction) {
+    try {
+      const user = (req as any).user;
+
+      const payload = {
+        ...req.body,
+        createdBy: user.userId,
+        updatedBy: user.userId,
+      };
+
+      const created = await workOrderService.create(payload);
+
+      res.status(201).json({
+        success: true,
+        data: created,
+      });
+    } catch (error) {
+      next(err);
+    }
+  },
+
   /* =====================================================
      APPROVE WORK ORDER
   ====================================================== */

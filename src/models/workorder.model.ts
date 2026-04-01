@@ -17,6 +17,7 @@ const workOrderItemSchema = new mongoose.Schema(
       refPath: "items.itemType",
     },
 
+    name: String,
     description: String,
 
     quantity: {

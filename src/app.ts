@@ -152,7 +152,7 @@ app.use("/api/sales-invoices", salesInvoiceRoutes);
 app.use("/api/sales-returns", salesReturnRoutes);
 
 /* ===== OPERATIONS ===== */
-app.use("/api/workorders", workordersRoutes);
+app.use("/api/workorders", requireAuth, workordersRoutes);
 app.use("/api/grs", requireAuth, goodReceiptRoutes);
 
 /* ===== ACCOUNTS ===== */

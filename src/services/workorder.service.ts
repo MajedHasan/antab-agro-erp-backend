@@ -11,6 +11,7 @@ const base = createCrudService(WorkOrderModel, {
     "warehouseOrFactory",
     "createdBy",
     "approvedBy",
+    "items.itemId",
   ],
   searchFields: ["workOrderNo", "status"],
   allowedFilterFields: [
@@ -23,6 +24,14 @@ const base = createCrudService(WorkOrderModel, {
 
 export const workOrderService = {
   ...base,
+
+  async create(payload: any) {
+    return base.withTransaction(async (session) => {
+      const workOrder = base.create(payload, { session });
+
+      return workOrder;
+    });
+  },
 
   async list(
     params: { filter?: any; page?: number; limit?: number; q?: string } = {},
