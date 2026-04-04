@@ -137,7 +137,13 @@ export const grService = {
         const itemDoc: any = item.itemId;
         const itemName = itemDoc?.name || "Item";
         const productCategory =
-          item.itemType === "RawMaterial" ? "Raw" : "Packaging";
+          item.itemType === "RawMaterial"
+            ? "Raw"
+            : item.itemType === "PackagingItem"
+              ? "Packaging"
+              : item.itemType === "FinishedProduct"
+                ? "Finished"
+                : "Other";
 
         // Use new helper: Assets -> Inventory -> category -> product
         const itemAccount = await accountService.getAccountByPath(
@@ -145,7 +151,13 @@ export const grService = {
             "Assets",
             "Current Assets",
             "Inventory",
-            productCategory === "Raw" ? "Raw Materials" : "Packaging Materials",
+            productCategory === "Raw"
+              ? "Raw Materials"
+              : productCategory === "Packaging"
+                ? "Packaging Materials"
+                : productCategory === "Finished"
+                  ? "Finished Product"
+                  : "Other Product",
             itemName,
           ],
           "Asset",
@@ -277,25 +289,125 @@ export const grService = {
       /* =====================================================
        8️⃣ UPDATE STOCK (unchanged)
     ====================================================== */
+      // const factoryId =
+      //   gr.warehouseOrFactory || gr.workOrderId?.warehouseOrFactory;
+      // const { RawMaterialStock } = await import("../models/rawMaterials.model");
+      // const { PackagingStock } = await import("../models/packagingItems.model");
+      // const ProductStock = await import("../models/productStock.model");
+
+      // for (const item of gr.items) {
+      //   const StockModel =
+      //     item.itemType === "RawMaterial"
+      //       ? RawMaterialStock
+      //       : item.itemType === "PackingItem"
+      //         ? PackagingStock
+      //         : item.itemType === "FinishedItem"
+      //           ? ProductStock
+      //           : ProductStock;
+      //   const idField =
+      //     item.itemType === "RawMaterial" ? "rawMaterialId" : "packagingItemId";
+
+      //   await StockModel.findOneAndUpdate(
+      //     { [idField]: item.itemId, factoryId },
+      //     {
+      //       $inc: { quantity: item.receivedQty },
+      //       $setOnInsert: { unit: item.unit },
+      //     },
+      //     { upsert: true, session },
+      //   );
+      // }
+
+      /* =====================================================
+   8️⃣ UPDATE STOCK (FINAL FIXED VERSION)
+  ===================================================== */
+
       const factoryId =
         gr.warehouseOrFactory || gr.workOrderId?.warehouseOrFactory;
+
+      if (!factoryId) {
+        throw new Error("Factory/Warehouse not found for GR");
+      }
+
+      // ✅ Import models correctly
       const { RawMaterialStock } = await import("../models/rawMaterials.model");
       const { PackagingStock } = await import("../models/packagingItems.model");
+      const { OtherProductStock } =
+        await import("../models/otherProducts.model");
+      const ProductStock = (await import("../models/productStock.model"))
+        .default;
 
+      // ✅ Resolver (STRICT & SAFE)
+      const resolveStockConfig = (type: string) => {
+        switch (type) {
+          case "RawMaterial":
+            return {
+              model: RawMaterialStock,
+              idField: "rawMaterialId",
+              locationField: "factoryId",
+            };
+
+          case "PackagingItem":
+            return {
+              model: PackagingStock,
+              idField: "packagingItemId",
+              locationField: "factoryId",
+            };
+
+          case "FinishedProduct":
+            return {
+              model: ProductStock,
+              idField: "productId",
+              locationField: "warehouseId",
+            };
+
+          case "OtherProduct":
+            return {
+              model: OtherProductStock,
+              idField: "otherProductId", // ⚠️ keep as is (your schema)
+              locationField: "factoryId",
+            };
+
+          default:
+            throw new Error(`Unsupported item type: ${type}`);
+        }
+      };
+
+      // ✅ Update stock
       for (const item of gr.items) {
-        const StockModel =
-          item.itemType === "RawMaterial" ? RawMaterialStock : PackagingStock;
-        const idField =
-          item.itemType === "RawMaterial" ? "rawMaterialId" : "packagingItemId";
+        if (!item.itemId) {
+          throw new Error("GR item missing itemId");
+        }
 
-        await StockModel.findOneAndUpdate(
-          { [idField]: item.itemId, factoryId },
-          {
-            $inc: { quantity: item.receivedQty },
-            $setOnInsert: { unit: item.unit },
+        const {
+          model: StockModel,
+          idField,
+          locationField,
+        } = resolveStockConfig(item.itemType);
+
+        const query: any = {
+          [idField]: item.itemId,
+          [locationField]: factoryId,
+        };
+
+        const update: any = {
+          $inc: {
+            quantity: Number(item.receivedQty || 0),
           },
-          { upsert: true, session },
-        );
+          $set: {
+            lastUpdated: new Date(),
+          },
+          $setOnInsert: {
+            unit: item.unit,
+            [idField]: item.itemId,
+            [locationField]: factoryId,
+          },
+        };
+
+        await StockModel.findOneAndUpdate(query, update, {
+          upsert: true,
+          new: true,
+          session,
+        });
       }
 
       /* =====================================================

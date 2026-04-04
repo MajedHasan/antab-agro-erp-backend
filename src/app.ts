@@ -39,6 +39,8 @@ import packagingStockRoutes from "./routes/packagingStock.routes";
 import warehouseTransferRoutes from "./routes/warehouse-transfer.routes";
 import productsRoutes from "./routes/product.routes";
 import productStockRoutes from "./routes/productStock.routes";
+import otherProductsRoutes from "./routes/otherProduct.routes";
+import otherProductStockRoutes from "./routes/otherProductStock.routes";
 import promotionRoutes from "./routes/product-promotion.routes"; // << add this
 
 /* ===== PRODUCTION ===== */
@@ -139,6 +141,9 @@ app.use("/api/transfers", requireAuth, warehouseTransferRoutes);
 
 app.use("/api/products", productsRoutes);
 app.use("/api/product-stocks", productStockRoutes);
+
+app.use("/api/other-products", otherProductsRoutes);
+app.use("/api/other-product-stocks", otherProductStockRoutes);
 
 app.use("/api/promotions", promotionRoutes); // << add this
 

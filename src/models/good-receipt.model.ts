@@ -12,7 +12,7 @@ const grItemSchema = new mongoose.Schema(
 
     itemType: {
       type: String,
-      enum: ["RawMaterial", "PackagingItem"],
+      enum: ["RawMaterial", "PackagingItem", "FinishedProduct", "OtherProduct"],
       required: true,
     },
 
