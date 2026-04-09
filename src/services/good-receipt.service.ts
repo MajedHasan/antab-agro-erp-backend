@@ -1,8 +1,5 @@
-// src/services/gr.service.ts
 import { createCrudService } from "./crud.service";
 import GRModel from "../models/good-receipt.model";
-import { Account } from "../models/account.model";
-import { mediaService } from "./media.service";
 
 const base = createCrudService(GRModel, {
   softDeleteField: "deletedAt",
@@ -15,30 +12,37 @@ export const grService = {
   ...base,
 
   /* =====================================================
-     CREATE GR
-     - Prevent creating GR if receivedQty >= work order qty
+     CREATE GR WITH UNIT CONVERSION
   ====================================================== */
+  /* =====================================================
+   CREATE GR WITH UNIT CONVERSION + 10% TOLERANCE
+===================================================== */
   async create(payload: any, opts: { session?: any } = {}) {
     const session = opts.session;
-
     const WorkOrderModel = (await import("../models/workorder.model")).default;
+
+    if (!payload?.workOrderId) {
+      throw new Error("workOrderId is required");
+    }
+
+    if (!Array.isArray(payload.items) || payload.items.length === 0) {
+      throw new Error("At least one GR item is required");
+    }
+
     const workOrder = await WorkOrderModel.findById(payload.workOrderId)
       .populate("items.itemId")
       .lean();
+
     if (!workOrder) throw new Error("Work Order not found");
 
-    // Prepare a map of payload items by workOrderItemId
-    const payloadMap = new Map<string, number>();
+    const payloadMap = new Map<string, any>();
     for (const item of payload.items) {
-      if (!item.workOrderItemId)
-        throw new Error(`Item ${item.itemId} missing workOrderItemId`);
-      payloadMap.set(
-        String(item.workOrderItemId),
-        Number(item.receivedQty || 0),
-      );
+      if (!item.workOrderItemId) {
+        throw new Error(`Item ${item.itemId || ""} missing workOrderItemId`);
+      }
+      payloadMap.set(String(item.workOrderItemId), item);
     }
 
-    // MongoDB aggregation: sum already received quantities per workOrderItemId
     const receivedAggregates = await base.model.aggregate([
       { $match: { workOrderId: workOrder._id, status: { $ne: "Rejected" } } },
       { $unwind: "$items" },
@@ -52,100 +56,167 @@ export const grService = {
 
     const receivedMap = new Map<string, number>();
     for (const r of receivedAggregates) {
-      receivedMap.set(String(r._id), r.totalReceived);
+      receivedMap.set(String(r._id), Number(r.totalReceived) || 0);
     }
 
-    // Validate each payload item
-    for (const woItem of workOrder.items) {
+    for (const woItem of workOrder.items || []) {
+      const payloadItem = payloadMap.get(String(woItem._id));
+      if (!payloadItem) continue;
+
+      const itemDoc: any = woItem.itemId;
+      const itemName =
+        itemDoc?.name || woItem.itemName || woItem.name || "Item";
+
+      const woQty = Number(woItem.quantity || 0);
       const receivedAlready = receivedMap.get(String(woItem._id)) || 0;
-      const toReceive = payloadMap.get(String(woItem._id)) || 0;
-      const totalAfterThisGR = receivedAlready + toReceive;
+      const receivedNow = Number(payloadItem.receivedQty || 0);
 
-      if (totalAfterThisGR > Number(woItem.quantity || 0)) {
-        // Use name or itemCode if available, fallback to ID
-        const displayName =
-          woItem.itemId?.name ||
-          woItem.itemName ||
-          woItem.itemCode ||
-          woItem._id;
+      // ✅ SKIP items with 0 qty
+      if (receivedNow <= 0) {
+        payloadItem.inventoryQty = 0;
+        payloadItem.convertedQty = 0;
+        continue;
+      }
 
+      // ✅ CHECK: at least one item must have quantity > 0
+      const hasAtLeastOneQty = payload.items.some(
+        (it: any) => Number(it.receivedQty || 0) > 0,
+      );
+
+      if (!hasAtLeastOneQty) {
         throw new Error(
-          `Cannot receive ${toReceive} for item ${displayName}. Already received: ${receivedAlready}, Work Order quantity: ${woItem.quantity}`,
+          "At least one item must have received quantity greater than 0",
         );
+      }
+
+      const maxAllowed = woQty * 1.1;
+      const totalAfter = receivedAlready + receivedNow;
+
+      console.log("Total After: ", totalAfter, "maxAllowed: ", maxAllowed);
+
+      if (totalAfter > maxAllowed) {
+        throw new Error(
+          `Cannot receive ${receivedNow} for ${itemName}. Allowed with 10% tolerance: ${maxAllowed}. Already received: ${receivedAlready}. Work Order quantity: ${woQty}`,
+        );
+      }
+
+      const woUnit = String(
+        payloadItem.workOrderUnit || woItem.unit || "",
+      ).trim();
+      const invUnit = String(
+        payloadItem.inventoryUnit || itemDoc?.unit || payloadItem.unit || "",
+      ).trim();
+
+      let conversionFactor = Number(payloadItem.conversionFactor || 1);
+
+      if (woUnit && invUnit && woUnit.toUpperCase() !== invUnit.toUpperCase()) {
+        if (!conversionFactor || conversionFactor <= 0) {
+          throw new Error(
+            `Conversion factor required for ${itemName} (${woUnit} → ${invUnit})`,
+          );
+        }
+      } else {
+        conversionFactor = 1;
+      }
+
+      const inventoryQty =
+        payloadItem.inventoryQty !== undefined &&
+        Number(payloadItem.inventoryQty) > 0
+          ? Number(payloadItem.inventoryQty)
+          : receivedNow * conversionFactor;
+
+      const unitPrice = Number(
+        payloadItem.unitPrice > 0
+          ? payloadItem.unitPrice
+          : woItem.unitPrice || itemDoc?.unitPrice || 0,
+      );
+
+      payloadItem.receivedQty = receivedNow;
+      payloadItem.inventoryQty = inventoryQty;
+      payloadItem.convertedQty = inventoryQty; // backward compatibility
+      payloadItem.conversionFactor = conversionFactor;
+      payloadItem.workOrderUnit = woUnit;
+      payloadItem.inventoryUnit = invUnit;
+      payloadItem.unit = invUnit || woUnit;
+      payloadItem.unitPrice = unitPrice;
+
+      if (Number(payloadItem.transportCost || 0) > 0) {
+        payloadItem.transportPaymentSource =
+          payloadItem.transportPaymentSource || "Factory";
+      } else {
+        payloadItem.transportPaymentSource = "Pending";
       }
     }
 
-    // ✅ Everything ok, create GR
     return base.create(payload, { session });
   },
 
   /* =====================================================
-     APPROVE GR
-     - Increase stock
-     - Update Work Order receivedQuantity
-     - Create accounting vouchers:
-        • Inventory (Journal) — debits inventory, credits supplier (unit price only)
-        • Transport (CashPayment) — if transportCost entered and marked Factory,
-          debits Freight Inward (per product) and credits Cash In Factory
+     APPROVE GR WITH STOCK & VOUCHER UPDATES
+  ====================================================== */
+  /* =====================================================
+   APPROVE GR WITH STOCK & VOUCHER UPDATES
   ====================================================== */
   async approve(grId: string, userId: string) {
     return base.withTransaction(async (session) => {
-      /* =====================================================
-       1️⃣ LOCK & FETCH GR
-    ====================================================== */
       const gr = await base.model
         .findOne({ _id: grId, status: "Pending" })
         .session(session)
         .populate("supplier workOrderId")
-        .lean(false); // need document for saving
+        .lean(false);
 
       if (!gr) throw new Error("GR not found or already processed");
-      if (!gr.items || gr.items.length === 0)
+      if (!gr.items || gr.items.length === 0) {
         throw new Error("GR contains no items");
+      }
 
-      /* =====================================================
-       2️⃣ POPULATE ITEM REFERENCES
-    ====================================================== */
       await gr.populate("items.itemId");
 
-      /* =====================================================
-       3️⃣ ACCOUNTING SERVICES
-    ====================================================== */
       const { accountService } = await import("./account.service");
       const { voucherService } = await import("./voucher.service");
 
-      /* =====================================================
-       4️⃣ ENSURE SUPPLIER ACCOUNT
-    ====================================================== */
-      const supplierRef: any = gr.supplier;
+      const getWoQty = (item: any) => Number(item.receivedQty || 0);
+
+      const getInventoryQty = (item: any) => {
+        const invQty = Number(item.inventoryQty || 0);
+        if (invQty > 0) return invQty;
+
+        const convQty = Number(item.convertedQty || 0);
+        if (convQty > 0) return convQty;
+
+        return (
+          Number(item.receivedQty || 0) * Number(item.conversionFactor || 1)
+        );
+      };
+
+      const supplierId = String((gr.supplier as any)?._id || gr.supplier);
+      const supplierName =
+        (gr.supplier as any)?.supplierName ||
+        (gr.supplier as any)?.name ||
+        "Supplier";
+
       const supplierAccount = await accountService.createAutoAccountForEntity({
         entityType: "Supplier",
-        entityId: supplierRef.toString(),
-        name:
-          (supplierRef as any)?.supplierName ||
-          (supplierRef as any)?.name ||
-          "Supplier",
+        entityId: supplierId,
+        name: supplierName,
       });
 
-      /* =====================================================
-       5️⃣ BUILD INVENTORY VOUCHER LINES
-    ====================================================== */
       const invLines: any[] = [];
       let inventoryTotal = 0;
 
       for (const item of gr.items) {
         const itemDoc: any = item.itemId;
-        const itemName = itemDoc?.name || "Item";
+
         const productCategory =
           item.itemType === "RawMaterial"
             ? "Raw"
             : item.itemType === "PackagingItem"
               ? "Packaging"
-              : item.itemType === "FinishedProduct"
+              : item.itemType === "FinishedProduct" ||
+                  item.itemType === "Product"
                 ? "Finished"
                 : "Other";
 
-        // Use new helper: Assets -> Inventory -> category -> product
         const itemAccount = await accountService.getAccountByPath(
           [
             "Assets",
@@ -158,14 +229,14 @@ export const grService = {
                 : productCategory === "Finished"
                   ? "Finished Product"
                   : "Other Product",
-            itemName,
+            itemDoc?.name || "Item",
           ],
           "Asset",
           { session },
         );
 
-        const lineAmount =
-          Number(item.receivedQty || 0) * Number(item.unitPrice || 0);
+        const woQty = getWoQty(item);
+        const lineAmount = woQty * Number(item.unitPrice || 0);
         inventoryTotal += lineAmount;
 
         invLines.push({
@@ -176,7 +247,6 @@ export const grService = {
         });
       }
 
-      // Credit supplier
       invLines.push({
         accountId: supplierAccount._id,
         debit: 0,
@@ -184,9 +254,6 @@ export const grService = {
         narration: `Payable for GR ${gr.grNo}`,
       });
 
-      /* =====================================================
-       6️⃣ CREATE & APPROVE INVENTORY VOUCHER
-    ====================================================== */
       const invVoucher = await voucherService.create({
         voucherNo: `GR-${gr.grNo}-${Date.now()}`,
         date: gr.issueDate || new Date(),
@@ -201,18 +268,8 @@ export const grService = {
 
       await voucherService.approve(invVoucher._id.toString(), userId);
 
-      /* =====================================================
-       7️⃣ TRANSPORT COST (Factory-paid)
-       Uses getAccountByPath to simplify hierarchy
-    ====================================================== */
       const transportLines: any[] = [];
       const transportItemsIndex: number[] = [];
-
-      const freightParentAcc = await accountService.getAccountByPath(
-        ["Expense", "Cost Of Goods Sold", "Freight Inward"],
-        "Expense",
-        { session },
-      );
 
       const cashInFactoryAcc = await accountService.getAccountByPath(
         [
@@ -229,36 +286,36 @@ export const grService = {
       for (let idx = 0; idx < gr.items.length; idx++) {
         const item = gr.items[idx];
         const tcost = Number(item.transportCost || 0);
-        const tsource = item.transportPaymentSource || "Pending";
 
-        if (tcost > 0 && tsource === "Factory") {
-          const itemName =
-            (item.itemId as any)?.name || `Item-${String(item.itemId)}`;
-
-          // Create/find freight product account under Freight Inward
-          const freightProdAcc = await accountService.getAccountByPath(
-            ["Expense", "Cost Of Goods Sold", "Freight Inward", itemName],
+        if (tcost > 0 && item.transportPaymentSource === "Factory") {
+          const freightAcc = await accountService.getAccountByPath(
+            [
+              "Expense",
+              "Cost Of Goods Sold",
+              "Freight Inward",
+              (item.itemId as any)?.name || "Item",
+            ],
             "Expense",
             { session },
           );
 
           transportLines.push({
-            accountId: freightProdAcc._id,
+            accountId: freightAcc._id,
             debit: tcost,
             credit: 0,
-            narration: `Freight for ${itemName} - GR ${gr.grNo}`,
+            narration: `Freight for ${item.itemId} - GR ${gr.grNo}`,
           });
 
           transportItemsIndex.push(idx);
         }
       }
 
-      // If any factory-paid lines, create CashPayment voucher
       if (transportLines.length > 0) {
         const transportTotal = transportLines.reduce(
-          (s, l) => s + Number(l.debit || 0),
+          (sum, line) => sum + Number(line.debit || 0),
           0,
         );
+
         transportLines.push({
           accountId: cashInFactoryAcc._id,
           debit: 0,
@@ -286,49 +343,9 @@ export const grService = {
         }
       }
 
-      /* =====================================================
-       8️⃣ UPDATE STOCK (unchanged)
-    ====================================================== */
-      // const factoryId =
-      //   gr.warehouseOrFactory || gr.workOrderId?.warehouseOrFactory;
-      // const { RawMaterialStock } = await import("../models/rawMaterials.model");
-      // const { PackagingStock } = await import("../models/packagingItems.model");
-      // const ProductStock = await import("../models/productStock.model");
+      const locationId = gr.warehouseOrFactory?._id || gr.warehouseOrFactory;
+      if (!locationId) throw new Error("GR warehouse/factory is required");
 
-      // for (const item of gr.items) {
-      //   const StockModel =
-      //     item.itemType === "RawMaterial"
-      //       ? RawMaterialStock
-      //       : item.itemType === "PackingItem"
-      //         ? PackagingStock
-      //         : item.itemType === "FinishedItem"
-      //           ? ProductStock
-      //           : ProductStock;
-      //   const idField =
-      //     item.itemType === "RawMaterial" ? "rawMaterialId" : "packagingItemId";
-
-      //   await StockModel.findOneAndUpdate(
-      //     { [idField]: item.itemId, factoryId },
-      //     {
-      //       $inc: { quantity: item.receivedQty },
-      //       $setOnInsert: { unit: item.unit },
-      //     },
-      //     { upsert: true, session },
-      //   );
-      // }
-
-      /* =====================================================
-   8️⃣ UPDATE STOCK (FINAL FIXED VERSION)
-  ===================================================== */
-
-      const factoryId =
-        gr.warehouseOrFactory || gr.workOrderId?.warehouseOrFactory;
-
-      if (!factoryId) {
-        throw new Error("Factory/Warehouse not found for GR");
-      }
-
-      // ✅ Import models correctly
       const { RawMaterialStock } = await import("../models/rawMaterials.model");
       const { PackagingStock } = await import("../models/packagingItems.model");
       const { OtherProductStock } =
@@ -336,7 +353,6 @@ export const grService = {
       const ProductStock = (await import("../models/productStock.model"))
         .default;
 
-      // ✅ Resolver (STRICT & SAFE)
       const resolveStockConfig = (type: string) => {
         switch (type) {
           case "RawMaterial":
@@ -345,38 +361,33 @@ export const grService = {
               idField: "rawMaterialId",
               locationField: "factoryId",
             };
-
           case "PackagingItem":
             return {
               model: PackagingStock,
               idField: "packagingItemId",
               locationField: "factoryId",
             };
-
           case "FinishedProduct":
+          case "Product":
             return {
               model: ProductStock,
               idField: "productId",
               locationField: "warehouseId",
             };
-
           case "OtherProduct":
+          case "OtherProducts":
             return {
               model: OtherProductStock,
-              idField: "otherProductId", // ⚠️ keep as is (your schema)
+              idField: "otherProductId",
               locationField: "factoryId",
             };
-
           default:
             throw new Error(`Unsupported item type: ${type}`);
         }
       };
 
-      // ✅ Update stock
       for (const item of gr.items) {
-        if (!item.itemId) {
-          throw new Error("GR item missing itemId");
-        }
+        if (!item.itemId) throw new Error("GR item missing itemId");
 
         const {
           model: StockModel,
@@ -384,47 +395,39 @@ export const grService = {
           locationField,
         } = resolveStockConfig(item.itemType);
 
-        const query: any = {
-          [idField]: item.itemId,
-          [locationField]: factoryId,
-        };
+        const qty = getInventoryQty(item);
+        if (qty <= 0) continue;
 
-        const update: any = {
-          $inc: {
-            quantity: Number(item.receivedQty || 0),
+        await StockModel.findOneAndUpdate(
+          { [idField]: item.itemId, [locationField]: locationId },
+          {
+            $inc: { quantity: qty },
+            $set: { lastUpdated: new Date() },
+            $setOnInsert: {
+              unit: item.inventoryUnit || item.unit || item.workOrderUnit || "",
+              [idField]: item.itemId,
+              [locationField]: locationId,
+            },
           },
-          $set: {
-            lastUpdated: new Date(),
-          },
-          $setOnInsert: {
-            unit: item.unit,
-            [idField]: item.itemId,
-            [locationField]: factoryId,
-          },
-        };
-
-        await StockModel.findOneAndUpdate(query, update, {
-          upsert: true,
-          new: true,
-          session,
-        });
+          { upsert: true, new: true, session },
+        );
       }
 
-      /* =====================================================
-       9️⃣ UPDATE WORK ORDER PROGRESS (unchanged)
-    ====================================================== */
       if (gr.workOrderId) {
         const WorkOrderModel = (await import("../models/workorder.model"))
           .default;
-        const workOrder = await WorkOrderModel.findById(
-          gr.workOrderId._id,
-        ).session(session);
+        const workOrderId = gr.workOrderId?._id || gr.workOrderId;
+
+        const workOrder =
+          await WorkOrderModel.findById(workOrderId).session(session);
+
         if (!workOrder) throw new Error("Work Order not found");
 
         const allGRs = await base.model
-          .find({ workOrderId: workOrder._id, status: { $ne: "Rejected" } })
+          .find({ workOrderId, status: { $ne: "Rejected" } })
           .session(session)
           .lean();
+
         const combinedGRs = [...allGRs];
         if (!combinedGRs.find((g) => String(g._id) === String(gr._id))) {
           combinedGRs.push({ ...gr.toObject(), status: "Approved" });
@@ -432,20 +435,23 @@ export const grService = {
 
         const receivedMap: Record<string, number> = {};
         for (const g of combinedGRs) {
-          for (const it of g.items) {
-            const key = String(it.itemId);
+          for (const it of g.items || []) {
+            const key = String(it.workOrderItemId || it.itemId);
             receivedMap[key] =
               (receivedMap[key] || 0) + Number(it.receivedQty || 0);
           }
         }
 
-        let totalOrdered = 0,
-          totalReceived = 0;
-        for (const woItem of workOrder.items) {
+        let totalOrdered = 0;
+        let totalReceived = 0;
+
+        for (const woItem of workOrder.items || []) {
           const ordered = Number(woItem.quantity || 0);
-          const received = receivedMap[String(woItem.itemId)] || 0;
+          const received = receivedMap[String(woItem._id)] || 0;
+
           woItem.receivedQty = received;
           woItem.progress = ordered > 0 ? (received / ordered) * 100 : 0;
+
           totalOrdered += ordered;
           totalReceived += received;
         }
@@ -455,7 +461,7 @@ export const grService = {
           totalOrdered > 0 ? (totalReceived / totalOrdered) * 100 : 0;
 
         workOrder.status =
-          totalReceived >= totalOrdered && totalOrdered > 0
+          totalOrdered > 0 && totalReceived >= totalOrdered
             ? "Completed"
             : totalReceived > 0
               ? "Approved"
@@ -464,16 +470,12 @@ export const grService = {
         await workOrder.save({ session });
       }
 
-      /* =====================================================
-       🔟 FINALIZE GR
-    ====================================================== */
       gr.status = "Approved";
       gr.approvedBy = userId;
       gr.approvedAt = new Date();
       gr.voucherId = invVoucher._id;
 
       await gr.save({ session });
-
       return gr;
     });
   },

@@ -7,12 +7,11 @@ const grItemSchema = new mongoose.Schema(
   {
     workOrderItemId: {
       type: mongoose.Schema.Types.ObjectId,
-      required: false,
     },
 
     itemType: {
       type: String,
-      enum: ["RawMaterial", "PackagingItem", "FinishedProduct", "OtherProduct"],
+      enum: ["RawMaterial", "PackagingItem", "Product", "OtherProducts"],
       required: true,
     },
 
@@ -22,11 +21,45 @@ const grItemSchema = new mongoose.Schema(
       refPath: "items.itemType",
     },
 
+    /* =========================
+       QUANTITIES
+    ========================== */
+
+    // Work Order Unit Quantity (kg, ton, etc)
     receivedQty: {
       type: Number,
       required: true,
     },
 
+    // Converted Inventory Quantity (pcs, ml, etc)
+    inventoryQty: {
+      type: Number,
+      required: true,
+      default: 0,
+    },
+
+    // Work Order Unit (kg)
+    workOrderUnit: {
+      type: String,
+    },
+
+    // Inventory Unit (pcs)
+    inventoryUnit: {
+      type: String,
+    },
+
+    convertedQty: {
+      type: Number,
+      default: 0,
+    }, // keep for backward compatibility
+
+    // Conversion Factor (kg → pcs)
+    conversionFactor: {
+      type: Number,
+      default: 1,
+    },
+
+    // Final stored unit (inventory unit)
     unit: {
       type: String,
     },
@@ -36,9 +69,9 @@ const grItemSchema = new mongoose.Schema(
       default: 0,
     },
 
-    /* =====================================================
-       TRANSPORT COST PER PRODUCT
-    ====================================================== */
+    /* =========================
+       TRANSPORT
+    ========================== */
 
     transportCost: {
       type: Number,
@@ -51,7 +84,6 @@ const grItemSchema = new mongoose.Schema(
       default: "Pending",
     },
 
-    /* LINK TO PAYMENT VOUCHER (OPTIONAL) */
     transportVoucherId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Voucher",
@@ -129,6 +161,11 @@ const goodsReceiptSchema = new mongoose.Schema(
     issueDate: {
       type: Date,
       default: Date.now,
+    },
+
+    voucherId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Voucher",
     },
 
     /* =====================================================
@@ -295,22 +332,12 @@ goodsReceiptSchema.pre("save", async function (next) {
     }
 
     for (const item of this.items) {
-      if (!item.unitPrice || item.unitPrice === 0) {
-        const priceFromWO = priceMap.get(item.itemId.toString()) || 0;
-        item.unitPrice = priceFromWO;
-      }
-
-      item.lineTotal =
-        Number(item.receivedQty || 0) * Number(item.unitPrice || 0);
-
+      const qty = Number(item.convertedQty || item.receivedQty || 0);
+      item.lineTotal = qty * Number(item.unitPrice || 0);
       sub += item.lineTotal;
-
       transportTotal += Number(item.transportCost || 0);
-
-      /* AUTO SET FACTORY IF COST ENTERED */
-      if (item.transportCost > 0 && item.transportPaymentSource === "Pending") {
+      if (item.transportCost > 0 && item.transportPaymentSource === "Pending")
         item.transportPaymentSource = "Factory";
-      }
     }
   } else {
     for (const item of this.items) {
@@ -336,7 +363,7 @@ goodsReceiptSchema.pre("save", async function (next) {
 
   this.remainingAmount = this.grandTotal - this.paidAmount;
 
-  if (this.remainingAmount <= 0) {
+  if (this.grandTotal > 0 && this.remainingAmount <= 0) {
     this.paymentStatus = "Paid";
   } else if (this.paidAmount > 0) {
     this.paymentStatus = "Partial";
