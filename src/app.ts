@@ -46,6 +46,7 @@ import promotionRoutes from "./routes/product-promotion.routes"; // << add this
 /* ===== PRODUCTION ===== */
 import bomRoutes from "./routes/bom.routes";
 import productionRoutes from "./routes/production.routes";
+import materialWipRoutes from "./routes/materialWip.routes";
 
 /* ===== SALES ===== */
 import salesOrderRoutes from "./routes/sales-order.routes";
@@ -150,6 +151,7 @@ app.use("/api/promotions", promotionRoutes); // << add this
 /* ===== PRODUCTION ===== */
 app.use("/api/bom", bomRoutes);
 app.use("/api/productions", requireAuth, productionRoutes);
+app.use("/api/material-wip", requireAuth, materialWipRoutes);
 
 /* ===== SALES ===== */
 app.use("/api/sales-orders", requireAuth, salesOrderRoutes);
