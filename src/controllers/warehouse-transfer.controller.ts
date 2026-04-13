@@ -1,101 +1,214 @@
-// src/controllers/warehouse-transfer.controller.ts
-
 import { Request, Response, NextFunction } from "express";
-import { warehouseTransferService } from "../services/warehouse-transfer.service";
 import { createCrudController } from "./crud.controller";
+import {
+  warehouseTransferCrudService,
+  warehouseTransferService,
+} from "../services/warehouse-transfer.service";
 
-/**
- * ==========================================================
- * Base CRUD Controller
- * - list
- * - get
- * - update
- * - delete
- * ==========================================================
- */
-const baseController = createCrudController(warehouseTransferService);
+function getUser(req: Request) {
+  const u = (req as any).user;
+  if (!u) return undefined;
+
+  return {
+    userId: u.userId || u._id || String(u.id || ""),
+    name: u.name,
+    role: u.role,
+  };
+}
+
+const baseController = createCrudController(warehouseTransferCrudService, {
+  defaultPopulate: [
+    { path: "sender" },
+    { path: "receiver" },
+    { path: "createdBy", select: "name email role" },
+    { path: "receiverNsmApprovedBy", select: "name email role" },
+    { path: "senderReviewedBy", select: "name email role" },
+    { path: "senderNsmApprovedBy", select: "name email role" },
+    { path: "dispatchedBy", select: "name email role" },
+    { path: "receivedBy", select: "name email role" },
+    { path: "items.productId", select: "name sku unit salePrice" },
+  ],
+});
 
 export const warehouseTransferController = {
   ...baseController,
 
-  /**
-   * ==========================================================
-   * CREATE (Override)
-   * ==========================================================
-   */
   create: async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const user = (req as any).user;
-
-      const transfer = await warehouseTransferService.create({
-        ...req.body,
-        createdBy: user?.userId,
-      });
-
-      res.status(201).json({
-        success: true,
-        data: transfer,
-      });
+      const user = getUser(req);
+      const data = await warehouseTransferService.create(req.body, { user });
+      res.status(201).json({ success: true, data });
     } catch (err) {
       next(err);
     }
   },
 
-  /**
-   * ==========================================================
-   * RECEIVE
-   * ==========================================================
-   */
+  update: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = getUser(req);
+      const data = await warehouseTransferService.update(
+        req.params.id,
+        req.body,
+        {
+          user,
+        },
+      );
+      res.json({ success: true, data });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  delete: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const data = await warehouseTransferService.remove(req.params.id);
+      res.json({ success: true, data });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  bulkCreate: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = getUser(req);
+      const data = await warehouseTransferService.bulkCreate(req.body, {
+        user,
+      });
+      res.status(201).json({ success: true, data });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  bulkDelete: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = getUser(req);
+
+      const data = await warehouseTransferService.bulkDelete(
+        req.body.filters || [],
+        {
+          user,
+        },
+      );
+      res.json({ success: true, data });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  receiverNSMApprove: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const user = getUser(req);
+      const data = await warehouseTransferService.receiverNSMApprove(
+        req.params.id,
+        req.body,
+        user as any,
+      );
+      res.json({ success: true, data });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  senderReview: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = getUser(req);
+      const data = await warehouseTransferService.senderReview(
+        req.params.id,
+        req.body,
+        user as any,
+      );
+      res.json({ success: true, data });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  senderNSMApprove: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = getUser(req);
+      const data = await warehouseTransferService.senderNSMApprove(
+        req.params.id,
+        req.body,
+        user as any,
+      );
+      res.json({ success: true, data });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  generatePrintSnapshot: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const user = getUser(req);
+      const data = await warehouseTransferService.generatePrintSnapshot(
+        req.params.id,
+        user as any,
+      );
+      res.json({ success: true, data });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  dispatch: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = getUser(req);
+      const data = await warehouseTransferService.dispatch(
+        req.params.id,
+        user as any,
+      );
+      res.json({ success: true, data });
+    } catch (err) {
+      next(err);
+    }
+  },
+
   receive: async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const user = (req as any).user;
-
-      const result = await warehouseTransferService.receive(
+      const user = getUser(req);
+      const data = await warehouseTransferService.receive(
         req.params.id,
-        user?.userId,
+        req.body,
+        user as any,
       );
-
-      res.json({ success: true, data: result });
+      res.json({ success: true, data });
     } catch (err) {
       next(err);
     }
   },
 
-  /**
-   * ==========================================================
-   * FINAL APPROVE
-   * ==========================================================
-   */
-  finalApprove: async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const user = (req as any).user;
-
-      const result = await warehouseTransferService.finalApprove(
-        req.params.id,
-        user?.userId,
-      );
-
-      res.json({ success: true, data: result });
-    } catch (err) {
-      next(err);
-    }
-  },
-
-  /**
-   * ==========================================================
-   * CANCEL
-   * ==========================================================
-   */
   cancel: async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const user = (req as any).user;
-
-      const result = await warehouseTransferService.cancel(
+      const user = getUser(req);
+      const data = await warehouseTransferService.cancel(
         req.params.id,
-        user?.userId,
+        req.body,
+        user as any,
       );
+      res.json({ success: true, data });
+    } catch (err) {
+      next(err);
+    }
+  },
 
-      res.json({ success: true, data: result });
+  reject: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = getUser(req);
+      const data = await warehouseTransferService.reject(
+        req.params.id,
+        req.body,
+        user as any,
+      );
+      res.json({ success: true, data });
     } catch (err) {
       next(err);
     }

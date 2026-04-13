@@ -17,6 +17,7 @@ export const productStockService = {
 
     // ✅ FIX: extract properly
     let locationType = params.locationType || params.filter?.locationType;
+    let warehouseId = params.warehouseId || params.filter?.warehouseId;
 
     const productId = params.filter?.productId;
 
@@ -24,6 +25,11 @@ export const productStockService = {
     if (params.filter?.locationType) {
       delete params.filter.locationType;
     }
+    if (params.filter?.warehouseId) {
+      delete params.filter.warehouseId;
+    }
+
+    console.log("WarehouseID: ", warehouseId);
 
     const skip = (page - 1) * limit;
 
@@ -34,6 +40,14 @@ export const productStockService = {
       pipeline.push({
         $match: {
           productId: new mongoose.Types.ObjectId(productId),
+        },
+      });
+    }
+    // ✅ filter by warehouseId FIRST
+    if (warehouseId) {
+      pipeline.push({
+        $match: {
+          warehouseId: new mongoose.Types.ObjectId(warehouseId),
         },
       });
     }
