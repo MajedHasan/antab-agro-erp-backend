@@ -27,6 +27,10 @@ const baseController = createCrudController(warehouseTransferCrudService, {
     { path: "dispatchedBy", select: "name email role" },
     { path: "receivedBy", select: "name email role" },
     { path: "items.productId", select: "name sku unit salePrice" },
+    {
+      path: "documents.signed.mediaId",
+      select: "url fileName module folder",
+    },
   ],
 });
 
