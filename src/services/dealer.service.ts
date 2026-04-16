@@ -1,12 +1,25 @@
-// src/services/dealer.service.ts
 import DealerModel from "../models/dealer.model";
 import { createCrudService } from "./crud.service";
 import { accountService } from "./account.service";
 import { mediaService } from "./media.service";
 
-/* =========================================================
-   BASE CRUD
-========================================================= */
+type DealerStatus = "Pending" | "Active" | "Blocked";
+
+type DealerCreditSummary = {
+  dealerId: string;
+  dealerType: "CASH" | "CREDIT";
+  creditLimit: number;
+  currentDue: number;
+  available: number;
+  canUseCredit: boolean;
+};
+
+type GenerateCodeInput = {
+  zone?: string;
+  region?: string;
+  area?: string;
+  territory?: string;
+};
 
 const base = createCrudService(DealerModel, {
   defaultPopulate: [
@@ -17,19 +30,16 @@ const base = createCrudService(DealerModel, {
     "assignedSalesManager",
     "warehouse",
     "accountId",
-
-    // 🔥 Populate Media attachments
     "attachments.required.bankCheque",
     "attachments.required.tradeLicense",
     "attachments.required.nidCard",
     "attachments.required.informationDeed",
     "attachments.required.pesticideLicense",
+    "attachments.required.signature",
     "attachments.optional.agreements",
     "attachments.optional.others",
   ],
-
   searchFields: ["name", "code", "proprietor", "email", "phoneNumber"],
-
   allowedFilterFields: [
     "zone",
     "region",
@@ -38,71 +48,50 @@ const base = createCrudService(DealerModel, {
     "status",
     "warehouse",
   ],
-
-  /* =====================================================
-     AFTER CREATE → AUTO ACCOUNT
-  ====================================================== */
   afterCreate: async (doc: any) => {
     if (!doc?._id) return doc;
 
     try {
-      // call the extended service method (idempotent)
-      await dealerService.createAutoAccountForDealer(doc._id.toString());
+      await dealerService.createAutoAccountForDealer(String(doc._id));
     } catch (err) {
       console.error("Auto dealer account creation failed:", err);
     }
 
     return doc;
   },
-
-  /* =====================================================
-     AFTER UPDATE → SYNC ACCOUNT NAME
-  ====================================================== */
   afterUpdate: async (doc: any) => {
-    if (!doc?._id) return;
+    if (!doc?._id) return doc;
 
     try {
-      await dealerService.syncAccountName(doc._id.toString());
+      await dealerService.syncAccountName(String(doc._id));
     } catch (err) {
       console.error("Dealer account sync failed:", err);
     }
-  },
 
-  /* =====================================================
-     BEFORE DELETE
-     - Delete all linked media
-     - Deactivate linked account
-  ====================================================== */
+    return doc;
+  },
   beforeDelete: async (id: string) => {
-    const dealer = await DealerModel.findById(id).lean<any>();
+    const dealer = await DealerModel.findById(id).lean().exec();
     if (!dealer) return;
 
-    const attachments = dealer.attachments || {
+    const attachments = (dealer as any).attachments || {
       required: {},
       optional: { agreements: [], others: [] },
     };
 
-    /* =========================
-       🔥 DELETE REQUIRED MEDIA
-    ========================== */
     if (attachments.required) {
       for (const key of Object.keys(attachments.required)) {
         const mediaId = attachments.required[key];
-        if (mediaId) {
-          try {
-            await mediaService.delete(mediaId.toString(), {
-              hard: true,
-            });
-          } catch (err) {
-            console.error(`Failed to delete required attachment [${key}]`, err);
-          }
+        if (!mediaId) continue;
+
+        try {
+          await mediaService.delete(String(mediaId), { hard: true });
+        } catch (err) {
+          console.error(`Failed to delete required attachment [${key}]`, err);
         }
       }
     }
 
-    /* =========================
-       🔥 DELETE OPTIONAL MEDIA
-    ========================== */
     if (attachments.optional) {
       for (const key of Object.keys(attachments.optional)) {
         const mediaIds: string[] = attachments.optional[key] || [];
@@ -111,9 +100,7 @@ const base = createCrudService(DealerModel, {
           if (!mediaId) continue;
 
           try {
-            await mediaService.delete(mediaId.toString(), {
-              hard: true,
-            });
+            await mediaService.delete(String(mediaId), { hard: true });
           } catch (err) {
             console.error(`Failed to delete optional attachment [${key}]`, err);
           }
@@ -121,87 +108,216 @@ const base = createCrudService(DealerModel, {
       }
     }
 
-    /* =====================================================
-       🔥 Deactivate linked account (do NOT delete ledger)
-    ====================================================== */
-    if (dealer.accountId) {
-      await accountService
-        .update(dealer.accountId.toString(), {
+    if ((dealer as any).accountId) {
+      try {
+        await accountService.update(String((dealer as any).accountId), {
           status: "Inactive",
-        })
-        .catch(() => {});
+        });
+      } catch {
+        // ignore
+      }
     }
   },
 });
 
-/* =========================================================
-   EXTENDED DEALER SERVICE
-========================================================= */
-
 export const dealerService = {
   ...base,
 
-  /* =====================================================
-     AUTO ACCOUNT CREATION
-     - robust, idempotent.
-     - uses accountService.createAutoAccountForEntity when needed
-  ====================================================== */
+  async assertDealerActive(dealerId: string) {
+    const dealer = await DealerModel.findById(dealerId).lean().exec();
+    if (!dealer) {
+      throw new Error("Dealer not found");
+    }
+
+    if ((dealer as any).status === "Blocked") {
+      throw new Error("Dealer is blocked");
+    }
+
+    return dealer;
+  },
+
+  async getCreditSummary(dealerId: string): Promise<DealerCreditSummary> {
+    const dealer = await DealerModel.findById(dealerId).lean().exec();
+    if (!dealer) {
+      throw new Error("Dealer not found");
+    }
+
+    const creditLimit = Number((dealer as any).creditLimit || 0);
+    const currentDue = Number((dealer as any).currentDue || 0);
+    const available = creditLimit - currentDue;
+    const dealerType = ((dealer as any).type || "CASH") as "CASH" | "CREDIT";
+
+    return {
+      dealerId: String((dealer as any)._id),
+      dealerType,
+      creditLimit,
+      currentDue,
+      available,
+      canUseCredit: dealerType === "CREDIT" && available > 0,
+    };
+  },
+
+  async validateCredit(dealerId: string, amount: number) {
+    if (!amount || Number.isNaN(Number(amount)) || Number(amount) <= 0) {
+      throw new Error("amount must be a positive number");
+    }
+
+    const summary = await this.getCreditSummary(dealerId);
+    const amountNumber = Number(amount);
+
+    return {
+      ...summary,
+      requestedAmount: amountNumber,
+      canUseCredit:
+        summary.dealerType === "CREDIT" && summary.available >= amountNumber,
+    };
+  },
+
+  async getSignatureTemplate(dealerId: string) {
+    const dealer = await DealerModel.findById(dealerId)
+      .populate("attachments.required.signature")
+      .lean()
+      .exec();
+
+    if (!dealer) {
+      throw new Error("Dealer not found");
+    }
+
+    const signature = (dealer as any)?.attachments?.required?.signature || null;
+
+    return {
+      dealerId: String((dealer as any)._id),
+      signature,
+    };
+  },
+
+  async updateSignatureTemplate(dealerId: string, mediaId: string) {
+    if (!mediaId) {
+      throw new Error("mediaId is required");
+    }
+
+    const Media = DealerModel.db.model("Media");
+    const media = await Media.findById(mediaId).lean().exec();
+    if (!media) {
+      throw new Error("Media file not found");
+    }
+
+    const updated = await DealerModel.findByIdAndUpdate(
+      dealerId,
+      {
+        $set: {
+          "attachments.required.signature": mediaId,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    )
+      .populate(base.model.schema.options?.populate || undefined)
+      .exec();
+
+    if (!updated) {
+      throw new Error("Dealer not found");
+    }
+
+    return updated;
+  },
+
+  async updateCreditLimit(dealerId: string, creditLimit: number) {
+    const value = Number(creditLimit);
+
+    if (Number.isNaN(value) || value < 0) {
+      throw new Error("creditLimit must be a valid non-negative number");
+    }
+
+    const updated = await DealerModel.findByIdAndUpdate(
+      dealerId,
+      { $set: { creditLimit: value } },
+      { new: true, runValidators: true },
+    ).exec();
+
+    if (!updated) {
+      throw new Error("Dealer not found");
+    }
+
+    return updated;
+  },
+
+  async updateCurrentDue(dealerId: string, currentDue: number) {
+    const value = Number(currentDue);
+
+    if (Number.isNaN(value) || value < 0) {
+      throw new Error("currentDue must be a valid non-negative number");
+    }
+
+    const updated = await DealerModel.findByIdAndUpdate(
+      dealerId,
+      { $set: { currentDue: value } },
+      { new: true, runValidators: true },
+    ).exec();
+
+    if (!updated) {
+      throw new Error("Dealer not found");
+    }
+
+    return updated;
+  },
+
   async createAutoAccountForDealer(dealerId: string) {
     if (!dealerId) return;
 
-    // load dealer
-    const dealer = await DealerModel.findById(dealerId).lean<any>();
+    const dealer = await DealerModel.findById(dealerId).lean().exec();
     if (!dealer) return;
 
-    // if already linked, nothing to do (but ensure name is synced)
-    if (dealer.accountId) {
-      // still ensure account name is up-to-date
+    if ((dealer as any).accountId) {
       try {
-        await accountService.update(String(dealer.accountId), {
-          name: dealer.name,
+        await accountService.update(String((dealer as any).accountId), {
+          name: (dealer as any).name,
         });
-      } catch (err) {
-        // non-fatal
+      } catch {
+        // ignore
       }
       return;
     }
 
-    const systemKey = `dealer:${String(dealer._id)}`;
+    const systemKey = `dealer:${String((dealer as any)._id)}`;
 
-    // 1) Try to find existing account by systemKey
     let account: any = null;
+
     try {
       account = await (accountService as any).findOne({
         systemKey,
         deletedAt: { $exists: false },
       });
-    } catch (err) {
-      // ignore, will create below
+    } catch {
       account = null;
     }
 
-    // 2) If not found, call createAutoAccountForEntity to ensure parent hierarchy and create the account
     if (!account) {
       try {
         account = await (accountService as any).createAutoAccountForEntity({
           entityType: "Dealer",
-          entityId: String(dealer._id),
-          name: dealer.name,
+          entityId: String((dealer as any)._id),
+          name: (dealer as any).name,
         });
       } catch (err) {
         console.error(
           "Failed to create auto account for dealer via accountService.createAutoAccountForEntity:",
           err,
         );
-        // fallback: try naive create (keeps compatibility) — but still include metadata
+
         try {
           account = await accountService.create({
-            name: dealer.name,
-            code: `DLR-${dealer.code || dealer._id}`,
+            name: (dealer as any).name,
+            code: `DLR-${(dealer as any).code || (dealer as any)._id}`,
             type: "Asset",
             category: "Accounts Receivable",
             status: "Active",
-            metadata: { entityType: "Dealer", entityId: dealer._id },
+            metadata: {
+              entityType: "Dealer",
+              entityId: (dealer as any)._id,
+            },
           });
         } catch (err2) {
           console.error("Fallback account creation also failed:", err2);
@@ -209,11 +325,10 @@ export const dealerService = {
         }
       }
     } else {
-      // ensure name up-to-date
-      if (account.name !== dealer.name) {
+      if (account.name !== (dealer as any).name) {
         try {
           await accountService.update(String(account._id || account.id), {
-            name: dealer.name,
+            name: (dealer as any).name,
           });
         } catch {
           // ignore
@@ -221,26 +336,26 @@ export const dealerService = {
       }
     }
 
-    // 3) If account exists but has no parent (bad historical state), attempt to re-parent under Accounts Receivable
     try {
       const accParent = account.parent;
       const hasParent = !!(accParent && String(accParent).length);
+
       if (!hasParent) {
         const ar = await (accountService as any).findOne({
           systemKey: "coa_accounts_receivable",
           deletedAt: { $exists: false },
         });
+
         if (ar && ar._id) {
           try {
             await accountService.update(String(account._id || account.id), {
               parent: String(ar._id),
             });
-            // refresh account variable
+
             account = await (accountService as any).getById(
               String(account._id || account.id),
             );
           } catch (err) {
-            // changing parent might fail if constraints; ignore
             console.warn(
               "Could not re-parent dealer account under Accounts Receivable:",
               err,
@@ -248,11 +363,10 @@ export const dealerService = {
           }
         }
       }
-    } catch (err) {
-      // ignore re-parent errors
+    } catch {
+      // ignore
     }
 
-    // 4) Link account to dealer record (use findByIdAndUpdate in case of concurrent updates)
     try {
       const accId = account._id ? account._id : account.id;
       if (accId) {
@@ -267,60 +381,47 @@ export const dealerService = {
     }
   },
 
-  /* =====================================================
-     ACCOUNT NAME SYNC
-  ====================================================== */
   async syncAccountName(dealerId: string) {
     if (!dealerId) return;
-    const dealer = await DealerModel.findById(dealerId).lean<any>();
+
+    const dealer = await DealerModel.findById(dealerId).lean().exec();
     if (!dealer) return;
 
-    // If dealer has accountId, update that account
     if ((dealer as any).accountId) {
       try {
-        await accountService.update((dealer as any).accountId.toString(), {
-          name: dealer.name,
+        await accountService.update(String((dealer as any).accountId), {
+          name: (dealer as any).name,
         });
-      } catch (err) {
+      } catch {
         // ignore
       }
       return;
     }
 
-    // If no accountId saved, attempt to find by systemKey and update
-    const systemKey = `dealer:${String(dealer._id)}`;
+    const systemKey = `dealer:${String((dealer as any)._id)}`;
+
     try {
       const acc = await (accountService as any).findOne({
         systemKey,
         deletedAt: { $exists: false },
       });
+
       if (acc && acc._id) {
-        await accountService.update(String(acc._id), { name: dealer.name });
-        // ensure dealer linked to this account for future
+        await accountService.update(String(acc._id), {
+          name: (dealer as any).name,
+        });
+
         await DealerModel.findByIdAndUpdate(dealerId, {
           $set: { accountId: acc._id },
         }).catch(() => {});
       }
-    } catch (err) {
+    } catch {
       // ignore
     }
   },
 
-  /* =====================================================
-     GENERATE DEALER CODE
-  ====================================================== */
-  async generateCode({
-    zone,
-    region,
-    area,
-    territory,
-  }: {
-    zone?: string;
-    region?: string;
-    area?: string;
-    territory?: string;
-  }) {
-    const conn = (base.model as any).db;
+  async generateCode({ zone, region, area, territory }: GenerateCodeInput) {
+    const conn = DealerModel.db;
     const Zone = conn.model("Zone");
     const Region = conn.model("Region");
     const Area = conn.model("Area");
@@ -357,26 +458,25 @@ export const dealerService = {
         : null,
     ]);
 
-    const firstLetter = (s?: string) =>
+    const first = (s?: string) =>
       !s ? "X" : s.trim()[0]?.toUpperCase() || "X";
 
     const initials =
-      firstLetter(zn?.name) +
-      firstLetter(rn?.name) +
-      firstLetter(an?.name) +
-      firstLetter(tn?.name);
+      first((zn as any)?.name) +
+      first((rn as any)?.name) +
+      first((an as any)?.name) +
+      first((tn as any)?.name);
 
     const regex = new RegExp(`^${initials}(\\d+)$`);
 
-    const existing = await base.model
-      .find({ code: regex })
+    const existing = await DealerModel.find({ code: regex })
       .select("code")
       .sort({ code: -1 })
       .limit(1)
-      .lean();
+      .lean()
+      .exec();
 
     let nextNumber = 1;
-
     if (existing?.length) {
       const match = (existing[0].code || "").match(regex);
       if (match?.[1]) {

@@ -8,22 +8,17 @@ export const salesOrderController = {
   ...createCrudController(salesOrderService),
 
   /* ================================
-     CREATE (Audit Injected)
+     CREATE
   ================================= */
-  create: async (
-    req: Request,
-    res: Response,
-    next: NextFunction,
-  ): Promise<void> => {
+  create: async (req: Request, res: Response, next: NextFunction) => {
     try {
       const user = (req as any).user;
 
       if (!user) {
-        res.status(401).json({
+        return res.status(401).json({
           success: false,
           message: "Unauthorized",
         });
-        return;
       }
 
       const payload = {
@@ -32,11 +27,11 @@ export const salesOrderController = {
         updatedBy: user.userId,
       };
 
-      const created = await salesOrderService.create(payload);
+      const data = await salesOrderService.create(payload);
 
       res.status(201).json({
         success: true,
-        data: created,
+        data,
       });
     } catch (err) {
       next(err);
@@ -44,32 +39,27 @@ export const salesOrderController = {
   },
 
   /* ================================
-     UPDATE (Audit Injected)
+     UPDATE
   ================================= */
-  update: async (
-    req: Request,
-    res: Response,
-    next: NextFunction,
-  ): Promise<void> => {
+  update: async (req: Request, res: Response, next: NextFunction) => {
     try {
       const user = (req as any).user;
 
       if (!user) {
-        res.status(401).json({
+        return res.status(401).json({
           success: false,
           message: "Unauthorized",
         });
-        return;
       }
 
-      const updated = await salesOrderService.update(req.params.id, {
+      const data = await salesOrderService.update(req.params.id, {
         ...req.body,
         updatedBy: user.userId,
       });
 
       res.json({
         success: true,
-        data: updated,
+        data,
       });
     } catch (err) {
       next(err);
@@ -79,108 +69,176 @@ export const salesOrderController = {
   /* ================================
      APPROVE
   ================================= */
-  approve: async (
-    req: Request,
-    res: Response,
-    next: NextFunction,
-  ): Promise<void> => {
+  approve: async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { role } = req.body;
+      const { role, remarks } = req.body;
       const user = (req as any).user;
 
       if (!user) {
-        res.status(401).json({ success: false, message: "Unauthorized" });
-        return;
-      }
-
-      if (!role) {
-        res.status(400).json({
-          success: false,
-          message: "role is required",
-        });
-        return;
-      }
-
-      const order = await salesOrderService.approve(
-        req.params.id,
-        role,
-        user.userId,
-      );
-
-      res.json({ success: true, data: order });
-    } catch (err) {
-      next(err);
-    }
-  },
-
-  /* ================================
-     SHIP
-  ================================= */
-  ship: async (
-    req: Request,
-    res: Response,
-    next: NextFunction,
-  ): Promise<void> => {
-    try {
-      const user = (req as any).user;
-
-      if (!user) {
-        res.status(401).json({ success: false, message: "Unauthorized" });
-        return;
-      }
-
-      const order = await salesOrderService.ship(req.params.id, user.userId);
-
-      res.json({ success: true, data: order });
-    } catch (err) {
-      next(err);
-    }
-  },
-
-  /* ================================
-     DELIVER
-  ================================= */
-  deliver: async (
-    req: Request,
-    res: Response,
-    next: NextFunction,
-  ): Promise<void> => {
-    try {
-      const user = (req as any).user;
-
-      if (!user) {
-        res.status(401).json({ success: false, message: "Unauthorized" });
-        return;
-      }
-
-      const invoice = await salesOrderService.deliver(
-        req.params.id,
-        user.userId,
-      );
-
-      res.json({ success: true, data: invoice });
-    } catch (err) {
-      next(err);
-    }
-  },
-
-  cancel: async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const user = (req as any).user;
-
-      if (!user) {
-        res.status(401).json({
+        return res.status(401).json({
           success: false,
           message: "Unauthorized",
         });
-        return;
       }
 
-      const result = await salesOrderService.cancel(req.params.id, user.userId);
+      if (!role) {
+        return res.status(400).json({
+          success: false,
+          message: "role is required",
+        });
+      }
+
+      const data = await salesOrderService.approve(
+        req.params.id,
+        role,
+        user.userId,
+        remarks,
+      );
 
       res.json({
         success: true,
-        data: result,
+        data,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  /* ================================
+     REJECT
+  ================================= */
+  reject: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { role, remarks } = req.body;
+      const user = (req as any).user;
+
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          message: "Unauthorized",
+        });
+      }
+
+      if (!role) {
+        return res.status(400).json({
+          success: false,
+          message: "role is required",
+        });
+      }
+
+      const data = await salesOrderService.reject(
+        req.params.id,
+        role,
+        user.userId,
+        remarks,
+      );
+
+      res.json({
+        success: true,
+        data,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  /* ================================
+     SHIP (IMPORTANT)
+     → returns printPayload with QR IMAGE
+  ================================= */
+  ship: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = (req as any).user;
+
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          message: "Unauthorized",
+        });
+      }
+
+      const result = await salesOrderService.ship(req.params.id, user.userId);
+
+      res.json({
+        success: true,
+        data: result, // includes printPayload (QR IMAGE ✅)
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  /* ================================
+     GET PRINTABLE INVOICE (FRONTEND PRINT BUTTON)
+  ================================= */
+  getPrintableInvoice: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const data = await salesOrderService.getPrintableInvoiceData(
+        req.params.id,
+      );
+
+      res.json({
+        success: true,
+        data, // includes qrCodeImage ✅
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  /* ================================
+     DELIVER (UPLOAD SIGNED INVOICE)
+     → file already uploaded → send mediaId
+  ================================= */
+  deliver: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = (req as any).user;
+
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          message: "Unauthorized",
+        });
+      }
+
+      const { uploadedDocumentFileId } = req.body;
+
+      if (!uploadedDocumentFileId) {
+        return res.status(400).json({
+          success: false,
+          message: "uploadedDocumentFileId is required",
+        });
+      }
+
+      const data = await salesOrderService.deliver(
+        req.params.id,
+        user.userId,
+        uploadedDocumentFileId,
+      );
+
+      res.json({
+        success: true,
+        data, // includes verification result ✅
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  /* ================================
+     CANCEL
+  ================================= */
+  cancel: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const data = await salesOrderService.cancel(req.params.id);
+
+      res.json({
+        success: true,
+        data,
       });
     } catch (err) {
       next(err);

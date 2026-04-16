@@ -71,6 +71,10 @@ export interface ISalesInvoice extends Document {
 
   notes?: string;
 
+  qrCode: string;
+  signedInvoice?: Types.ObjectId; // file path or media id
+  isVerified: boolean;
+
   createdBy: Types.ObjectId;
   updatedBy?: Types.ObjectId;
 
@@ -215,6 +219,21 @@ const SalesInvoiceSchema = new Schema<ISalesInvoice>(
 
     notes: { type: String },
 
+    qrCode: {
+      type: String,
+      index: true,
+    },
+
+    signedInvoice: {
+      type: Schema.Types.ObjectId, // file path or media id
+      ref: "Media",
+    },
+
+    isVerified: {
+      type: Boolean,
+      default: false,
+    },
+
     createdBy: {
       type: Schema.Types.ObjectId,
       ref: "User",
@@ -237,7 +256,12 @@ SalesInvoiceSchema.index({ invoiceNo: 1 });
 SalesInvoiceSchema.index({ orderId: 1 });
 SalesInvoiceSchema.index({ customerId: 1 });
 SalesInvoiceSchema.index({ invoiceDate: -1 });
-SalesInvoiceSchema.index({ paymentStatus: 1 });
+SalesInvoiceSchema.index({ paymentStatus: 1, status: 1 });
+
+SalesInvoiceSchema.pre("save", function (next) {
+  this.balanceAmount = this.grandTotal - this.paidAmount;
+  next();
+});
 
 export default mongoose.models.SalesInvoice ||
   mongoose.model<ISalesInvoice>("SalesInvoice", SalesInvoiceSchema);

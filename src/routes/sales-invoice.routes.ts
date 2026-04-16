@@ -8,10 +8,13 @@ const router = Router();
    Custom Invoice Routes
 ================================ */
 
-// Add payment
+// ✅ Get invoice by order (VERY IMPORTANT for your flow)
+router.get("/order/:orderId", salesInvoiceController.getByOrderId);
+
+// ✅ Add payment
 router.post("/:id/pay", salesInvoiceController.addPayment);
 
-// Cancel invoice
+// ✅ Cancel invoice
 router.post("/:id/cancel", salesInvoiceController.cancel);
 
 /* ===============================

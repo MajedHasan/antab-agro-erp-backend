@@ -1,25 +1,45 @@
+// src/routes/sales-order.routes.ts
+
 import { Router } from "express";
 import { createCrudRouter } from "./crud.routes";
 import { salesOrderController } from "../controllers/sales-order.controller";
 
 const router = Router();
 
-/* ===============================
-   Custom Workflow Routes
-================================ */
+/* =====================================================
+   SALES ORDER WORKFLOW ROUTES
+===================================================== */
 
-// Approve order
+/* ---------- APPROVAL FLOW ---------- */
+
+// Approve (A.M → R.M → N.S.M)
 router.post("/:id/approve", salesOrderController.approve);
 
-// Ship order
+// Reject (any approval stage)
+router.post("/:id/reject", salesOrderController.reject);
+
+/* ---------- SHIPPING FLOW ---------- */
+
+// Ship → Generate invoice + QR + printable payload
 router.post("/:id/ship", salesOrderController.ship);
 
-// Deliver order (creates invoice automatically)
+/* ---------- PRINT FLOW ---------- */
+
+// Get printable invoice (QR IMAGE + signature box)
+router.get("/:id/print", salesOrderController.getPrintableInvoice);
+
+/* ---------- DELIVERY FLOW ---------- */
+
+// Deliver → Upload signed invoice → QR + Signature verification + stock deduction
 router.post("/:id/deliver", salesOrderController.deliver);
 
-/* ===============================
-   Attach Standard CRUD Routes
-================================ */
+/* ---------- CANCEL ---------- */
+
+router.post("/:id/cancel", salesOrderController.cancel);
+
+/* =====================================================
+   STANDARD CRUD ROUTES
+===================================================== */
 
 const crudRouter = createCrudRouter(salesOrderController);
 router.use("/", crudRouter);

@@ -1,7 +1,5 @@
-// src/routes/dealer.routes.ts
 import { Router } from "express";
 import { dealerController } from "../controllers/dealer.controller";
-import { dealerService } from "../services/dealer.service";
 import { createCrudRouter } from "./crud.routes";
 
 const router = Router();
@@ -9,22 +7,7 @@ const router = Router();
 /* =====================================================
    1️⃣ Generate Dealer Code
 ===================================================== */
-router.get("/generate-code", async (req, res, next) => {
-  try {
-    const { zone, region, area, territory } = req.query;
-
-    const code = await dealerService.generateCode({
-      zone: zone as string | undefined,
-      region: region as string | undefined,
-      area: area as string | undefined,
-      territory: territory as string | undefined,
-    });
-
-    res.json({ success: true, data: code });
-  } catch (err) {
-    next(err);
-  }
-});
+router.get("/generate-code", dealerController.generateCode);
 
 /* =====================================================
    2️⃣ Auto Create Account for Dealer
@@ -37,9 +20,27 @@ router.post("/:id/auto-account", dealerController.autoAccount);
 router.post("/:id/sync-account-name", dealerController.syncAccountName);
 
 /* =====================================================
-   4️⃣ Standard CRUD Routes
+   4️⃣ Credit Management
 ===================================================== */
+router.get("/:id/credit-summary", dealerController.getCreditSummary);
 
+router.get("/:id/credit-validate", dealerController.validateCredit);
+
+/* =====================================================
+   5️⃣ Signature Management
+===================================================== */
+router.get("/:id/signature", dealerController.getSignatureTemplate);
+
+router.post("/:id/signature", dealerController.updateSignatureTemplate);
+
+/* =====================================================
+   6️⃣ Status Check
+===================================================== */
+router.get("/:id/status-check", dealerController.checkStatus);
+
+/* =====================================================
+   7️⃣ Standard CRUD Routes
+===================================================== */
 const crudRouter = createCrudRouter(dealerController);
 router.use("/", crudRouter);
 

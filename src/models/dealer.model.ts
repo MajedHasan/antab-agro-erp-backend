@@ -1,6 +1,10 @@
 // src/models/dealer.model.ts
-import mongoose from "mongoose";
+import mongoose, { HydratedDocument } from "mongoose";
 
+interface IDealer {
+  type: "CASH" | "CREDIT";
+}
+type DealerDocument = HydratedDocument<IDealer>;
 /**
  * Helper: get first letter of string (A-Z) fallback "X"
  */
@@ -107,6 +111,11 @@ const attachmentsSchema = new mongoose.Schema(
         ref: "Media",
         required: true,
       },
+      signature: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Media",
+        required: false,
+      },
     },
     optional: {
       agreements: [
@@ -145,14 +154,37 @@ const dealerSchema = new mongoose.Schema(
       required: true,
     },
 
-    type: { type: String, required: true }, // Credit / Cash
-    creditLimit: { type: Number, default: 0 },
+    type: {
+      type: String,
+      enum: ["CASH", "CREDIT"],
+      required: true,
+    },
+
+    creditLimit: {
+      type: Number,
+      default: 0,
+      validate: {
+        validator: function (this: DealerDocument, v: number) {
+          if (this.type === "CREDIT") return v > 0;
+          return true;
+        },
+        message: "Credit dealer must have credit limit",
+      },
+    },
+
+    currentDue: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
     openingBalance: { type: Number, default: 0 },
 
     accountId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Account",
       unique: true,
+      sparse: true,
     },
 
     phoneNumber: { type: String, required: true, unique: true },
@@ -169,7 +201,12 @@ const dealerSchema = new mongoose.Schema(
       required: true,
     },
 
-    status: { type: String, default: "Pending" },
+    status: {
+      type: String,
+      enum: ["Pending", "Active", "Blocked"],
+      default: "Pending",
+    },
+
     notes: { type: String },
 
     lastPurchaseDate: { type: Date }, // optional

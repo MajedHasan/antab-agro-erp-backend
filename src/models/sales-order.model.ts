@@ -1,4 +1,4 @@
-import mongoose, { Schema, Document, Types } from "mongoose";
+import mongoose, { Schema, Document, Types, HydratedDocument } from "mongoose";
 
 /* ===============================
    Order Item Interface
@@ -30,7 +30,7 @@ export interface ISalesOrderItem {
 ================================ */
 
 export interface IApprovalLog {
-  role: "M.O" | "A.M" | "R.M" | "N.S.M" | "A.C" | "WAREHOUSE" | "DELIVERY";
+  role: "A.M" | "R.M" | "N.S.M" | "FULFILLMENT" | "DELIVERY";
 
   userId: Types.ObjectId;
 
@@ -67,17 +67,24 @@ export interface ISalesOrder extends Document {
   ======================= */
 
   status:
-    | "PENDING"
-    | "A.M_CONFIRMED"
-    | "R.M_CONFIRMED"
-    | "N.S.M_CONFIRMED"
-    | "A.C_CONFIRMED"
+    | "PENDING_AM"
+    | "PENDING_RM"
+    | "PENDING_NSM"
+    | "PENDING_FULFILLMENT"
     | "IN_SHIPPING"
     | "DELIVERED"
     | "REJECTED"
     | "CANCELLED";
 
   approvalLogs: IApprovalLog[];
+
+  paymentMethod: "CASH" | "CREDIT";
+
+  creditSnapshot: {
+    creditLimit: number;
+    used: number;
+    available: number;
+  };
 
   /* ======================
      Delivery Info
@@ -103,6 +110,8 @@ export interface ISalesOrder extends Document {
   createdAt: Date;
   updatedAt: Date;
 }
+
+type SalesOrderDoc = HydratedDocument<ISalesOrder>;
 
 /* ===============================
    Schemas
@@ -147,7 +156,7 @@ const ApprovalLogSchema = new Schema<IApprovalLog>(
   {
     role: {
       type: String,
-      enum: ["M.O", "A.M", "R.M", "N.S.M", "A.C", "WAREHOUSE", "DELIVERY"],
+      enum: ["A.M", "R.M", "N.S.M", "FULFILLMENT", "DELIVERY"],
       required: true,
     },
 
@@ -210,22 +219,48 @@ const SalesOrderSchema = new Schema<ISalesOrder>(
     status: {
       type: String,
       enum: [
-        "PENDING",
-        "A.M_CONFIRMED",
-        "R.M_CONFIRMED",
-        "N.S.M_CONFIRMED",
-        "A.C_CONFIRMED",
+        "PENDING_AM",
+        "PENDING_RM",
+        "PENDING_NSM",
+        "PENDING_FULFILLMENT",
         "IN_SHIPPING",
         "DELIVERED",
         "REJECTED",
         "CANCELLED",
       ],
-      default: "PENDING",
+      default: "PENDING_AM",
     },
 
     approvalLogs: {
       type: [ApprovalLogSchema],
       default: [],
+    },
+
+    paymentMethod: {
+      type: String,
+      enum: ["CASH", "CREDIT"],
+      required: true,
+    },
+
+    creditSnapshot: {
+      _id: false,
+      creditLimit: {
+        type: Number,
+        required: function (this: SalesOrderDoc) {
+          return this.paymentMethod === "CREDIT";
+        },
+        default: 0,
+      },
+      used: {
+        type: Number,
+        required: function (this: SalesOrderDoc) {
+          return this.paymentMethod === "CREDIT";
+        },
+        default: 0,
+      },
+      available: {
+        type: Number,
+      },
     },
 
     deliveryManId: {
@@ -268,6 +303,17 @@ SalesOrderSchema.index({ orderNo: 1 });
 SalesOrderSchema.index({ customerId: 1 });
 SalesOrderSchema.index({ status: 1 });
 SalesOrderSchema.index({ orderDate: -1 });
+SalesOrderSchema.index({ paymentMethod: 1 });
+
+SalesOrderSchema.pre("validate", function (next) {
+  if (this.paymentMethod === "CREDIT" && this.creditSnapshot) {
+    const { creditLimit = 0, used = 0 } = this.creditSnapshot;
+
+    this.creditSnapshot.available = creditLimit - used;
+  }
+
+  next();
+});
 
 export default mongoose.models.SalesOrder ||
   mongoose.model<ISalesOrder>("SalesOrder", SalesOrderSchema);
