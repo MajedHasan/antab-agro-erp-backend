@@ -7,6 +7,21 @@ import QRCode from "qrcode";
 import sharp from "sharp";
 import jsQR from "jsqr";
 import fs from "fs/promises";
+import path from "path";
+// import { fromBuffer } from "pdf2pic";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+import {
+  createCanvas,
+  Image,
+  ImageData,
+  Path2D,
+  DOMMatrix,
+} from "@napi-rs/canvas";
+
+(globalThis as any).Image = Image;
+(globalThis as any).ImageData = ImageData;
+(globalThis as any).Path2D = Path2D;
+(globalThis as any).DOMMatrix = DOMMatrix;
 
 type ApprovalRole = "A.M" | "R.M" | "N.S.M" | "FULFILLMENT" | "DELIVERY";
 type OrderStatus =
@@ -19,7 +34,7 @@ type OrderStatus =
   | "REJECTED"
   | "CANCELLED";
 
-const SIGNATURE_SIMILARITY_THRESHOLD = 0.5;
+const SIGNATURE_SIMILARITY_THRESHOLD = 0.8;
 
 const defaultPopulate = [
   {
@@ -113,6 +128,26 @@ function ensureEditableOrderStatus(status: OrderStatus) {
   if (["IN_SHIPPING", "DELIVERED", "CANCELLED"].includes(status)) {
     throw new Error("Order can no longer be edited");
   }
+}
+
+function createPdfCanvasFactory() {
+  return {
+    create(width: number, height: number) {
+      const canvas = createCanvas(width, height);
+      const context = canvas.getContext("2d");
+      return { canvas, context };
+    },
+    reset(canvasAndContext: any, width: number, height: number) {
+      canvasAndContext.canvas.width = width;
+      canvasAndContext.canvas.height = height;
+    },
+    destroy(canvasAndContext: any) {
+      canvasAndContext.canvas.width = 0;
+      canvasAndContext.canvas.height = 0;
+      canvasAndContext.canvas = null;
+      canvasAndContext.context = null;
+    },
+  };
 }
 
 async function getDealerById(customerId: any, session?: any) {
@@ -273,6 +308,64 @@ async function releaseAllReservations(order: any, session: any) {
   }
 }
 
+async function normalizeToImageBuffer(
+  buffer: Buffer,
+  mimeType?: string,
+): Promise<Buffer> {
+  if (mimeType?.startsWith("image/")) {
+    return buffer;
+  }
+
+  if (mimeType === "application/pdf") {
+    const loadingTask = pdfjsLib.getDocument({
+      data: new Uint8Array(buffer),
+      disableFontFace: true,
+    });
+
+    const pdf = await loadingTask.promise;
+    const page = await pdf.getPage(1);
+
+    const viewport = page.getViewport({ scale: 2.5 });
+
+    const canvasFactory = createPdfCanvasFactory();
+    const { canvas, context } = canvasFactory.create(
+      viewport.width,
+      viewport.height,
+    );
+
+    await page.render({
+      canvasContext: context,
+      viewport,
+      canvasFactory,
+    } as any).promise;
+
+    const imageBuffer = canvas.toBuffer("image/png");
+
+    await page.cleanup?.();
+    await pdf.cleanup?.();
+
+    return imageBuffer;
+  }
+
+  throw new Error("Unsupported file type. Only image or PDF allowed");
+}
+
+async function normalizeSignatureBuffer(input: Buffer): Promise<Buffer> {
+  return sharp(input)
+    .rotate()
+    .flatten({ background: "#ffffff" })
+    .trim({ threshold: 10 })
+    .resize(700, 300, {
+      fit: "contain",
+      background: "#ffffff",
+    })
+    .greyscale() // New added
+    .normalize()
+    .sharpen()
+    .png()
+    .toBuffer();
+}
+
 async function readMediaBuffer(
   mediaId: string,
   session?: any,
@@ -284,8 +377,14 @@ async function readMediaBuffer(
   const media = await query;
   if (!media) throw new Error("Media file not found");
 
-  const filePath: string | undefined =
+  let filePath: string | undefined =
     media.filePath || media.path || media.localPath || media.storagePath;
+
+  // ✅ FIX: fallback from url
+  if (!filePath && media.url) {
+    filePath = path.join(process.cwd(), media.url);
+    // or use your actual uploads base dir
+  }
 
   if (!filePath) {
     throw new Error("Media file path is missing");
@@ -305,8 +404,14 @@ async function getMediaFilePath(
   const media = await query;
   if (!media) throw new Error("Media file not found");
 
-  const filePath: string | undefined =
+  let filePath: string | undefined =
     media.filePath || media.path || media.localPath || media.storagePath;
+
+  // ✅ FIX (same as readMediaBuffer)
+  if (!filePath && media.url) {
+    filePath = path.join(process.cwd(), media.url);
+    // console.log("Resolved dealer signature path:", filePath);
+  }
 
   if (!filePath) {
     throw new Error("Media file path is missing");
@@ -357,14 +462,29 @@ async function buildPrintableInvoiceData(
 }
 
 async function extractQrPayloadFromBuffer(fileBuffer: Buffer): Promise<string> {
-  const image = sharp(fileBuffer).ensureAlpha().greyscale();
-  const { data, info } = await image
+  const { data, info } = await sharp(fileBuffer)
+    .rotate()
+    .resize({ width: 1600, fit: "inside", withoutEnlargement: true })
+    .ensureAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
-  const result = jsQR(new Uint8ClampedArray(data), info.width, info.height);
+
+  const expected = info.width * info.height * 4;
+
+  if (data.length !== expected) {
+    throw new Error(
+      `Invalid QR image buffer: expected ${expected} bytes, got ${data.length}`,
+    );
+  }
+
+  const rgba = Uint8ClampedArray.from(data);
+
+  const result = jsQR(rgba, info.width, info.height);
+
   if (!result?.data) {
     throw new Error("QR code not found in uploaded document");
   }
+
   return result.data;
 }
 
@@ -377,20 +497,27 @@ async function extractSignatureCropBuffer(fileBuffer: Buffer): Promise<Buffer> {
     throw new Error("Unable to read uploaded document dimensions");
   }
 
-  const left = Math.max(0, Math.floor(width * 0.56));
-  const top = Math.max(0, Math.floor(height * 0.7));
-  const cropWidth = Math.max(1, Math.floor(width * 0.38));
-  const cropHeight = Math.max(1, Math.floor(height * 0.22));
+  const left = Math.max(0, Math.floor(width * 0.5));
+  const top = Math.max(0, Math.floor(height * 0.62));
+  const cropWidth = Math.max(1, Math.floor(width * 0.45));
+  const cropHeight = Math.max(1, Math.floor(height * 0.3));
 
   return sharp(fileBuffer)
+    .rotate()
     .extract({
       left,
       top,
       width: Math.min(cropWidth, width - left),
       height: Math.min(cropHeight, height - top),
     })
-    .resize(520, 220, { fit: "fill" })
-    .greyscale()
+    .flatten({ background: "#ffffff" })
+    .resize(700, 300, {
+      fit: "contain",
+      background: "#ffffff",
+    })
+    .greyscale() // New added
+    .normalize()
+    .sharpen()
     .png()
     .toBuffer();
 }
@@ -399,17 +526,21 @@ async function compareImageSimilarity(
   bufferA: Buffer,
   bufferB: Buffer,
 ): Promise<number> {
-  const width = 520;
-  const height = 220;
+  // const width = 520;
+  // const height = 220;
+  const width = 300;
+  const height = 120;
 
   const a = await sharp(bufferA)
-    .resize(width, height, { fit: "fill" })
+    // .resize(width, height, { fit: "fill" })
+    .resize(width, height, { fit: "contain", background: "#ffffff" })
     .greyscale()
     .raw()
     .toBuffer();
 
   const b = await sharp(bufferB)
-    .resize(width, height, { fit: "fill" })
+    // .resize(width, height, { fit: "fill" })
+    .resize(width, height, { fit: "contain", background: "#ffffff" })
     .greyscale()
     .raw()
     .toBuffer();
@@ -877,15 +1008,45 @@ export const salesOrderService = {
         throw new Error("Dealer signature template is missing");
       }
 
-      const uploadedBuffer = await readMediaBuffer(
+      // const uploadedBuffer = await readMediaBuffer(
+      //   uploadedDocumentFileId,
+      //   session,
+      // );
+
+      const Media = SalesOrder.db.model("Media");
+
+      const mediaDoc = await Media.findById(uploadedDocumentFileId).session(
+        session,
+      );
+      if (!mediaDoc) throw new Error("Uploaded media not found");
+
+      let uploadedBuffer = await readMediaBuffer(
         uploadedDocumentFileId,
         session,
       );
+
+      // ✅ NEW: normalize buffer (PDF → Image)
+      uploadedBuffer = await normalizeToImageBuffer(
+        uploadedBuffer,
+        mediaDoc.mimeType,
+      );
+
       const dealerSignaturePath = await getMediaFilePath(
         dealerSignatureId.toString(),
         session,
       );
-      const dealerSignatureBuffer = await fs.readFile(dealerSignaturePath);
+      // const dealerSignatureBuffer = await fs.readFile(dealerSignaturePath);
+
+      const dealerMedia =
+        await Media.findById(dealerSignatureId).session(session);
+      if (!dealerMedia) {
+        throw new Error("Dealer signature media not found");
+      }
+      let dealerSignatureBuffer = await fs.readFile(dealerSignaturePath);
+      dealerSignatureBuffer = await normalizeToImageBuffer(
+        dealerSignatureBuffer,
+        dealerMedia?.mimeType,
+      );
 
       const extractedQr = await extractQrPayloadFromBuffer(uploadedBuffer);
       let extractedQrJson: {
@@ -907,12 +1068,20 @@ export const salesOrderService = {
         throw new Error("QR mismatch: invoice/order does not match");
       }
 
-      const signatureCropBuffer =
-        await extractSignatureCropBuffer(uploadedBuffer);
-      const similarity = await compareImageSimilarity(
-        signatureCropBuffer,
+      const signatureCropBuffer = await normalizeSignatureBuffer(
+        await extractSignatureCropBuffer(uploadedBuffer),
+      );
+
+      const normalizedDealerSignatureBuffer = await normalizeSignatureBuffer(
         dealerSignatureBuffer,
       );
+
+      const similarity = await compareImageSimilarity(
+        signatureCropBuffer,
+        normalizedDealerSignatureBuffer,
+      );
+
+      console.log("Signature similarity:", similarity);
 
       if (similarity < SIGNATURE_SIMILARITY_THRESHOLD) {
         throw new Error("Dealer signature mismatch");
@@ -970,7 +1139,7 @@ export const salesOrderService = {
         invoice,
         verification: {
           qrMatched: true,
-          signatureSimilarity,
+          signatureSimilarity: similarity,
           signatureThreshold: SIGNATURE_SIMILARITY_THRESHOLD,
           uploadedDocumentFileId,
         },
