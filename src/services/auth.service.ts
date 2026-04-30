@@ -13,6 +13,7 @@ import mongoose, { ObjectId } from "mongoose";
 import { v4 as uuidv4 } from "uuid";
 import { sendVerificationEmail, sendPasswordResetEmail } from "../utils/email";
 import { AppError } from "../utils/appError";
+import { de } from "date-fns/locale";
 
 /**
  * Helper parse durations like "7d", "15m", "1h"
@@ -64,45 +65,6 @@ export async function registerUser(payload: {
   };
 }
 
-// export async function registerUser(payload: {
-//   email: string;
-//   password: string;
-//   name?: string;
-//   role?: string;
-// }) {
-//   console.log(payload);
-//   const existing = await UserModel.findOne({ email: payload.email });
-//   if (existing) throw new Error("Email already taken");
-//   const hashed = await bcrypt.hash(payload.password, 10);
-//   const user = await UserModel.create({
-//     email: payload.email,
-//     password: hashed,
-//     name: payload.name,
-//     role: payload.role || "user",
-//   });
-
-//   console.log(user, payload, hashed);
-
-//   // create verification token
-//   const vToken = uuidv4();
-//   const expiresMs = parseExpiryToMs("1d"); // verify link valid 1 day
-//   const expiresAt = new Date(Date.now() + expiresMs);
-//   await VerificationTokenModel.create({
-//     token: vToken,
-//     user: user._id,
-//     expiresAt,
-//   });
-
-//   // send "email" (in dev will log) and return link so dev can click
-//   const emailResult = await sendVerificationEmail(user.email, vToken);
-//   return {
-//     id: user._id,
-//     email: user.email,
-//     name: user.name,
-//     emailVerificationLink: emailResult.link,
-//   };
-// }
-
 export async function loginUser(payload: { email: string; password: string }) {
   try {
     const user = await UserModel.findOne({ email: payload.email }).populate({
@@ -150,7 +112,7 @@ export async function loginUser(payload: { email: string; password: string }) {
         name: populatedRole.name,
         permissions: Array.isArray(populatedRole.permissions)
           ? populatedRole.permissions.map((p: any) =>
-              p?.name ? p.name : p.toString()
+              p?.name ? p.name : p.toString(),
             )
           : [],
         isSystem: populatedRole.isSystem ?? false,
@@ -167,6 +129,7 @@ export async function loginUser(payload: { email: string; password: string }) {
         name: user.name,
         profileImageUrl: user.profileImageUrl,
         role: roleObj,
+        department: user.department,
       },
     };
   } catch (err: any) {
@@ -236,7 +199,7 @@ export async function rotateRefreshToken(oldRefreshToken: string) {
     // Token was revoked — investigation: revoke all tokens for user to mitigate reuse
     await RefreshTokenModel.updateMany(
       { user: stored.user },
-      { revoked: true }
+      { revoked: true },
     );
     throw new Error("Refresh token revoked");
   }
@@ -244,7 +207,7 @@ export async function rotateRefreshToken(oldRefreshToken: string) {
     // token mismatch (possible theft) — revoke all user tokens
     await RefreshTokenModel.updateMany(
       { user: stored.user },
-      { revoked: true }
+      { revoked: true },
     );
     throw new Error("Refresh token mismatch - suspicious");
   }
@@ -286,7 +249,7 @@ export async function rotateRefreshToken(oldRefreshToken: string) {
 
 export async function logoutByRefreshToken(
   refreshToken?: string,
-  userId?: string
+  userId?: string,
 ) {
   if (refreshToken) {
     // revoke only that token
@@ -300,13 +263,13 @@ export async function logoutByRefreshToken(
     if (payload?.jti) {
       await RefreshTokenModel.findOneAndUpdate(
         { jti: payload.jti },
-        { revoked: true }
+        { revoked: true },
       );
     }
   } else if (userId) {
     await RefreshTokenModel.updateMany(
       { user: new mongoose.Types.ObjectId(userId) },
-      { revoked: true }
+      { revoked: true },
     );
   }
 }

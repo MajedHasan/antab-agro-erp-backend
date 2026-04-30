@@ -1,3 +1,5 @@
+// src/routes/sales-return.routes.ts
+
 import { Router } from "express";
 import { createCrudRouter } from "./crud.routes";
 import { salesReturnController } from "../controllers/sales-return.controller";
@@ -5,17 +7,35 @@ import { salesReturnController } from "../controllers/sales-return.controller";
 const router = Router();
 
 /* ===============================
-   Custom Return Workflow Routes
+   SALES RETURN WORKFLOW ROUTES
 ================================ */
 
-// Approve return
+/* ---------- APPROVAL FLOW ---------- */
 router.post("/:id/approve", salesReturnController.approve);
+router.post("/:id/reject", salesReturnController.reject);
 
-// Complete return (warehouse received)
+/* ---------- HOLD / RESOLVE ---------- */
+router.post("/:id/hold", salesReturnController.hold);
+router.post("/:id/resolve-hold", salesReturnController.resolveHold);
+
+/* ---------- PRINT FLOW ---------- */
+router.post("/:id/printed", salesReturnController.markPrinted);
+router.get("/:id/print", salesReturnController.getPrintableReturnData);
+
+/* ---------- SUBMIT TO WAREHOUSE ---------- */
+router.post("/:id/send-to-warehouse", salesReturnController.sendToWarehouse);
+
+/* ---------- WAREHOUSE RECEIVING ---------- */
+router.post("/:id/warehouse-receive", salesReturnController.warehouseReceive);
+
+/* ---------- COMPLETE ---------- */
 router.post("/:id/complete", salesReturnController.complete);
 
+/* ---------- CANCEL ---------- */
+router.post("/:id/cancel", salesReturnController.cancel);
+
 /* ===============================
-   Attach Standard CRUD Routes
+   STANDARD CRUD ROUTES
 ================================ */
 
 const crudRouter = createCrudRouter(salesReturnController);

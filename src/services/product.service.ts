@@ -94,15 +94,27 @@ export const productService = {
       const product = await base.create(payload, { session });
 
       // 2️⃣ Create Ledger Account (ALWAYS Finished Goods)
-      const account = await accountService.createAutoAccountForEntity(
-        {
-          entityType: "Product",
-          entityId: product._id.toString(),
-          name: product.name,
-          productCategory: "Finished", // FIXED for this service
-        },
+      const account = await accountService.getAccountByPath(
+        [
+          "Assets",
+          "Current Assets",
+          "Inventory",
+          "Finished Goods",
+          product.name,
+        ],
+        "Assets",
         { session },
       );
+
+      // const account = await accountService.createAutoAccountForEntity(
+      //   {
+      //     entityType: "Product",
+      //     entityId: product._id.toString(),
+      //     name: product.name,
+      //     productCategory: "Finished", // FIXED for this service
+      //   },
+      //   { session },
+      // );
 
       // 3️⃣ Attach accountId to product
       await Product.findByIdAndUpdate(

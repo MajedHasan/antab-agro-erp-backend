@@ -56,6 +56,7 @@ import salesReturnRoutes from "./routes/sales-return.routes";
 /* ===== OPERATIONS ===== */
 import workordersRoutes from "./routes/workorder.routes";
 import goodReceiptRoutes from "./routes/good-receipt.routes";
+import tadaRoutes from "./modules/tada/tada.routes";
 
 /* ===== ACCESS / MEDIA ===== */
 import userLocationAccessRoutes from "./routes/userLocationAccess.routes";
@@ -88,12 +89,20 @@ app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 /* ===== MIDDLEWARE ===== */
 app.use(helmet());
+
 app.use(
   cors({
     origin: process.env.FRONTEND_URL || "http://localhost:3000",
     credentials: true,
   }),
 );
+// app.use(
+//   cors({
+//     origin: "*", // 🔥 allow mobile
+//     credentials: true,
+//   }),
+// );
+
 app.use(compression());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -156,11 +165,12 @@ app.use("/api/material-wip", requireAuth, materialWipRoutes);
 /* ===== SALES ===== */
 app.use("/api/sales-orders", requireAuth, salesOrderRoutes);
 app.use("/api/sales-invoices", salesInvoiceRoutes);
-app.use("/api/sales-returns", salesReturnRoutes);
+app.use("/api/sales-returns", requireAuth, salesReturnRoutes);
 
 /* ===== OPERATIONS ===== */
 app.use("/api/workorders", requireAuth, workordersRoutes);
 app.use("/api/grs", requireAuth, goodReceiptRoutes);
+app.use("/api/tada", requireAuth, tadaRoutes);
 
 /* ===== ACCOUNTS ===== */
 app.use("/api/accounts", accountRoutes);

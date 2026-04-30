@@ -8,7 +8,6 @@ import sharp from "sharp";
 import jsQR from "jsqr";
 import fs from "fs/promises";
 import path from "path";
-// import { fromBuffer } from "pdf2pic";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import {
   createCanvas,
@@ -49,7 +48,13 @@ const defaultPopulate = [
 
 const base = createCrudService(SalesOrder, {
   searchFields: ["orderNo"],
-  allowedFilterFields: ["customerId", "status", "warehouseId", "paymentMethod"],
+  allowedFilterFields: [
+    "customerId",
+    "status",
+    "warehouseId",
+    "paymentMethod",
+    "createdBy",
+  ],
   defaultPopulate,
 });
 
