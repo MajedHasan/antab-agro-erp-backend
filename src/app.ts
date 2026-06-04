@@ -52,16 +52,17 @@ import materialWipRoutes from "./routes/materialWip.routes";
 import salesOrderRoutes from "./routes/sales-order.routes";
 import salesInvoiceRoutes from "./routes/sales-invoice.routes";
 import salesReturnRoutes from "./routes/sales-return.routes";
+import collectionRoutes from "./modules/collection/collection.routes";
 
 /* ===== OPERATIONS ===== */
 import workordersRoutes from "./routes/workorder.routes";
 import goodReceiptRoutes from "./routes/good-receipt.routes";
 import tadaRoutes from "./modules/tada/tada.routes";
+import prescriptionRoutes from "./modules/prescription/prescription.routes";
 
 /* ===== ACCESS / MEDIA ===== */
 import userLocationAccessRoutes from "./routes/userLocationAccess.routes";
 import mediaRoutes from "./routes/media.routes";
-import classroomRoutes from "./routes/classroom.routes";
 
 /* ===== ACCOUNTS ===== */
 import accountRoutes from "./routes/account.routes";
@@ -82,6 +83,9 @@ import statementOfChangesInEquityRoutes from "./routes/statement-of-changes-in-e
 import trialBalanceRoutes from "./routes/trial-balance.routes";
 import ledgerRoutes from "./routes/ledger.routes";
 
+/* ===== REPORTS ===== */
+import reportRoutes from "./modules/reports/reports.routes";
+
 const app = express();
 
 /* ===== STATIC ===== */
@@ -90,18 +94,42 @@ app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 /* ===== MIDDLEWARE ===== */
 app.use(helmet());
 
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
-    credentials: true,
-  }),
-);
+// app.use(
+//   cors({
+//     origin: process.env.FRONTEND_URL || "http://localhost:3000",
+//     credentials: true,
+//   }),
+// );
 // app.use(
 //   cors({
 //     origin: "*", // 🔥 allow mobile
 //     credentials: true,
 //   }),
 // );
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      console.log("CORS origin:", origin);
+
+      // allow requests with no origin (mobile apps, Postman, curl)
+      if (!origin) return callback(null, true);
+
+      const allowedOrigins = [
+        process.env.FRONTEND_URL, // web
+        "http://localhost:3000",
+        "http://localhost:19006", // expo web
+      ];
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Not allowed by CORS"));
+    },
+    credentials: true,
+  }),
+);
 
 app.use(compression());
 app.use(express.json());
@@ -166,11 +194,13 @@ app.use("/api/material-wip", requireAuth, materialWipRoutes);
 app.use("/api/sales-orders", requireAuth, salesOrderRoutes);
 app.use("/api/sales-invoices", salesInvoiceRoutes);
 app.use("/api/sales-returns", requireAuth, salesReturnRoutes);
+app.use("/api/collection", requireAuth, collectionRoutes);
 
 /* ===== OPERATIONS ===== */
 app.use("/api/workorders", requireAuth, workordersRoutes);
 app.use("/api/grs", requireAuth, goodReceiptRoutes);
 app.use("/api/tada", requireAuth, tadaRoutes);
+app.use("/api/prescriptions", requireAuth, prescriptionRoutes);
 
 /* ===== ACCOUNTS ===== */
 app.use("/api/accounts", accountRoutes);
@@ -192,12 +222,14 @@ app.use("/api/reports/financial-notes", financialNotesRoutes);
 app.use("/api/reports/changes-in-equity", statementOfChangesInEquityRoutes);
 app.use("/api/reports/trial-balance", trialBalanceRoutes);
 
+/* ===== REPORTS ===== */
+app.use("/api/report", reportRoutes);
+
 /* ===== LEDGER ===== */
 app.use("/api/ledger", ledgerRoutes);
 
 /* ===== ACCESS / OTHERS ===== */
 app.use("/api/user-location-access", userLocationAccessRoutes);
-app.use("/api/classrooms", classroomRoutes);
 
 /* ===== HEALTH ===== */
 app.get("/", (req, res) => res.json({ status: "ok", version: "1.0.0" }));

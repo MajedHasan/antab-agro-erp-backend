@@ -1,5 +1,6 @@
 import bcrypt from "bcrypt";
 import UserModel from "../models/user.model";
+import UserLocationAccess from "../models/userLocationAccess.model";
 import { RefreshTokenModel } from "../models/refreshToken.model";
 import { VerificationTokenModel } from "../models/verificationToken.model";
 import { PasswordResetTokenModel } from "../models/passwordResetToken.model";
@@ -75,10 +76,56 @@ export async function loginUser(payload: { email: string; password: string }) {
     });
     if (!user) throw new AppError("Invalid email or password", 401);
 
-    console.log(user, payload);
-
     const ok = await bcrypt.compare(payload.password, user.password);
     if (!ok) throw new AppError("Invalid email or password", 401);
+
+    const userLocationAccessDoc = await UserLocationAccess.findOne({
+      user: user._id,
+    })
+      .populate("access.zone")
+      .populate("access.regions.region")
+      .populate("access.regions.areas.area")
+      .populate("access.regions.areas.territories");
+
+    function safeId(value: any) {
+      if (!value) return null;
+      if (typeof value === "string") return value;
+      return value._id?.toString?.() || value.id?.toString?.() || null;
+    }
+
+    function safeName(value: any) {
+      if (!value) return null;
+      if (typeof value === "string") return value;
+      return value.name || null;
+    }
+
+    const ula = userLocationAccessDoc;
+
+    const userLocationAccess = ula
+      ? {
+          zone: ula.access?.zone
+            ? {
+                id: safeId(ula.access.zone),
+                name: safeName(ula.access.zone),
+              }
+            : null,
+
+          regions: (ula.access?.regions || []).map((r: any) => ({
+            id: safeId(r.region),
+            name: safeName(r.region),
+
+            areas: (r.areas || []).map((a: any) => ({
+              id: safeId(a.area),
+              name: safeName(a.area),
+
+              territories: (a.territories || []).map((t: any) => ({
+                id: safeId(t),
+                name: safeName(t),
+              })),
+            })),
+          })),
+        }
+      : null;
 
     // issue access token & refresh token...
     const accessToken = signAccessToken({
@@ -130,6 +177,7 @@ export async function loginUser(payload: { email: string; password: string }) {
         profileImageUrl: user.profileImageUrl,
         role: roleObj,
         department: user.department,
+        userLocationAccess,
       },
     };
   } catch (err: any) {

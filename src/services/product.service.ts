@@ -102,7 +102,7 @@ export const productService = {
           "Finished Goods",
           product.name,
         ],
-        "Assets",
+        "Asset",
         { session },
       );
 

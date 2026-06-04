@@ -7,8 +7,9 @@ const router = createCrudRouter(warehouseOrFactoryController);
 router.post("/:id/assign-users", warehouseOrFactoryController.assignUsers);
 router.delete(
   "/:id/remove-user/:userId",
-  warehouseOrFactoryController.removeUser
+  warehouseOrFactoryController.removeUser,
 );
 router.get("/:id/users", warehouseOrFactoryController.listUsers);
+router.get("/:id/location", warehouseOrFactoryController.getWithAddress);
 
 export default router;

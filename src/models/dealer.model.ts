@@ -203,7 +203,7 @@ const dealerSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["Pending", "Active", "Blocked"],
+      enum: ["Pending", "Active", "Inactive", "Blocked"],
       default: "Pending",
     },
 

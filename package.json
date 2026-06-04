@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.99",
+    "axios": "^1.15.2",
     "bcrypt": "^5.1.0",
     "compression": "^1.7.4",
     "cors": "^2.8.5",

@@ -1,4 +1,4 @@
-import mediaModel from "../models/media.model";
+import mediaModel, { IMedia } from "../models/media.model";
 import { deleteFile } from "../utils/deleteFile.util";
 import { createCrudService } from "./crud.service";
 
