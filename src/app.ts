@@ -85,6 +85,7 @@ import ledgerRoutes from "./routes/ledger.routes";
 
 /* ===== REPORTS ===== */
 import reportRoutes from "./modules/reports/reports.routes";
+import stockTransactionRoutes from "./modules/stockTransaction/stockTransaction.routes";
 
 const app = express();
 
@@ -182,6 +183,8 @@ app.use("/api/product-stocks", productStockRoutes);
 
 app.use("/api/other-products", otherProductsRoutes);
 app.use("/api/other-product-stocks", otherProductStockRoutes);
+
+app.use("/api/stock-transactions", requireAuth, stockTransactionRoutes);
 
 app.use("/api/promotions", promotionRoutes); // << add this
 

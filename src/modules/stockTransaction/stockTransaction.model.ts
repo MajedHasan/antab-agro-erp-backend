@@ -1,0 +1,84 @@
+import mongoose, { Schema } from "mongoose";
+
+const batchDetailSchema = new Schema(
+  {
+    batchId: {
+      type: Schema.Types.ObjectId,
+      ref: "StockTransaction",
+      required: true,
+    },
+    quantity: { type: Number, required: true },
+    unitCost: { type: Number, required: true },
+    totalCost: { type: Number, required: true },
+  },
+  { _id: false },
+);
+
+const stockTransactionSchema = new Schema(
+  {
+    itemType: {
+      type: String,
+      enum: ["RawMaterial", "PackagingItem", "Product", "OtherProducts"],
+      required: true,
+    },
+    itemId: {
+      type: Schema.Types.ObjectId,
+      required: true,
+      refPath: "itemType",
+    },
+    locationId: {
+      type: Schema.Types.ObjectId,
+      ref: "WarehouseOrFactory",
+      required: true,
+    },
+    transactionType: {
+      type: String,
+      enum: [
+        "purchase",
+        "consumption",
+        "transfer_in",
+        "transfer_out",
+        "sale",
+        "return",
+        "wastage",
+        "adjustment",
+        "reservation", // marks a reservation (stores batchDetails)
+        "reservation_release", // optional fulfillment marker
+      ],
+      required: true,
+    },
+    quantity: {
+      type: Number,
+      required: true,
+      // positive = in (purchase, return, transfer_in)
+      // negative = out (consumption, sale, transfer_out, wastage)
+    },
+    // For purchase batches – tracks how much is still available for consumption/reservation
+    remainingQuantity: { type: Number, default: 0 },
+    // For purchase batches – tracks how much is currently reserved (but not yet consumed)
+    reserved: { type: Number, default: 0 },
+    unitCost: { type: Number, required: true },
+    totalCost: { type: Number, required: true },
+    sourceId: { type: Schema.Types.ObjectId },
+    sourceModel: { type: String },
+    batch: { type: String },
+    // Stores the exact batch breakdown for reservation transactions
+    batchDetails: [batchDetailSchema],
+    transactionDate: { type: Date, default: Date.now },
+    createdBy: { type: Schema.Types.ObjectId, ref: "User" },
+  },
+  { timestamps: true },
+);
+
+// Indexes for LIFO/FIFO queries
+stockTransactionSchema.index({
+  itemType: 1,
+  itemId: 1,
+  locationId: 1,
+  transactionDate: -1,
+});
+stockTransactionSchema.index({ sourceId: 1, sourceModel: 1 });
+
+export const StockTransaction =
+  mongoose.models.StockTransaction ||
+  mongoose.model("StockTransaction", stockTransactionSchema);

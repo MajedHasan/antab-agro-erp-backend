@@ -27,6 +27,7 @@ const DEFAULT_POPULATE = [
   { path: "updatedBy", select: "name email" },
   { path: "approvedBy", select: "name email" },
   { path: "rejectedBy", select: "name email" },
+  { path: "submittedBy", select: "name email" },
   // optional related refs (if present on model)
   { path: "source", select: "name code" }, // 👈 FIX
   { path: "mode" },

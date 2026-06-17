@@ -53,6 +53,7 @@ const base = createCrudService(Collection, {
     "dealers.invoices.invoiceId",
     "dealers.invoices.moneyReceipts.mrNo",
     "dealers.invoices.invoiceNo",
+    "workflowLogs.by", // ← NEW
   ],
 });
 
@@ -1044,6 +1045,13 @@ export const collectionService = {
     if (filters.date) {
       const date = new Date(filters.date);
       if (!Number.isNaN(date.getTime())) filter.date = date;
+    }
+
+    if (
+      filters["workflowLogs.by"] &&
+      isValidObjectId(filters["workflowLogs.by"])
+    ) {
+      filter["workflowLogs.by"] = cleanText(filters["workflowLogs.by"]);
     }
 
     const result = await base.list({
