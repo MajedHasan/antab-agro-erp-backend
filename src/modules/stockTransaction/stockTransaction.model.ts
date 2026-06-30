@@ -7,9 +7,9 @@ const batchDetailSchema = new Schema(
       ref: "StockTransaction",
       required: true,
     },
-    quantity: { type: Number, required: true },
-    unitCost: { type: Number, required: true },
-    totalCost: { type: Number, required: true },
+    quantity: { type: Number, required: true, set: (v: any) => parseFloat(v) },
+    unitCost: { type: Number, required: true, set: (v: any) => parseFloat(v) },
+    totalCost: { type: Number, required: true, set: (v: any) => parseFloat(v) },
   },
   { _id: false },
 );
@@ -44,21 +44,24 @@ const stockTransactionSchema = new Schema(
         "adjustment",
         "reservation", // marks a reservation (stores batchDetails)
         "reservation_release", // optional fulfillment marker
+        "production",
+        "production_return"
       ],
       required: true,
     },
     quantity: {
       type: Number,
       required: true,
+      set: (v: any) => parseFloat(v),
       // positive = in (purchase, return, transfer_in)
       // negative = out (consumption, sale, transfer_out, wastage)
     },
     // For purchase batches – tracks how much is still available for consumption/reservation
-    remainingQuantity: { type: Number, default: 0 },
+    remainingQuantity: { type: Number, default: 0, set: (v: any) => parseFloat(v) },
     // For purchase batches – tracks how much is currently reserved (but not yet consumed)
-    reserved: { type: Number, default: 0 },
-    unitCost: { type: Number, required: true },
-    totalCost: { type: Number, required: true },
+    reserved: { type: Number, default: 0, set: (v: any) => parseFloat(v) },
+    unitCost: { type: Number, required: true, set: (v: any) => parseFloat(v) },
+    totalCost: { type: Number, required: true, set: (v: any) => parseFloat(v) },
     sourceId: { type: Schema.Types.ObjectId },
     sourceModel: { type: String },
     batch: { type: String },
@@ -78,6 +81,23 @@ stockTransactionSchema.index({
   transactionDate: -1,
 });
 stockTransactionSchema.index({ sourceId: 1, sourceModel: 1 });
+
+// ────────────────────────────────────────────────────────
+// 🔥 Auto‑set remainingQuantity for incoming stock
+// ────────────────────────────────────────────────────────
+const INCOMING_TYPES = ["purchase", "production_return", "transfer_in"];
+
+stockTransactionSchema.pre("save", function (next) {
+  const doc = this as any; // fix TS "implicit any" error
+
+  if (
+    INCOMING_TYPES.includes(doc.transactionType) &&
+    (doc.remainingQuantity === undefined || doc.remainingQuantity === null)
+  ) {
+    doc.remainingQuantity = doc.quantity;
+  }
+  next();
+});
 
 export const StockTransaction =
   mongoose.models.StockTransaction ||

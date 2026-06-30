@@ -86,6 +86,7 @@ import ledgerRoutes from "./routes/ledger.routes";
 /* ===== REPORTS ===== */
 import reportRoutes from "./modules/reports/reports.routes";
 import stockTransactionRoutes from "./modules/stockTransaction/stockTransaction.routes";
+import materialWipReportRoutes from "./modules/reports/wip/wip-report.routes";
 
 const app = express();
 
@@ -227,6 +228,8 @@ app.use("/api/reports/trial-balance", trialBalanceRoutes);
 
 /* ===== REPORTS ===== */
 app.use("/api/report", reportRoutes);
+
+app.use("/api/wip-reports", materialWipReportRoutes);
 
 /* ===== LEDGER ===== */
 app.use("/api/ledger", ledgerRoutes);

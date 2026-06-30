@@ -3,6 +3,14 @@ import { ClientSession } from "mongoose";
 
 export type CostMethod = "FIFO" | "LIFO";
 
+const COST_BEARING_TRANSACTIONS = [
+  "purchase",
+  "production_return",
+  "transfer_in",
+  "production",
+  "return"
+];
+
 export const inventoryCostService = {
   /**
    * Automatic consumption using FIFO or LIFO.
@@ -24,7 +32,7 @@ export const inventoryCostService = {
       itemType,
       itemId,
       locationId,
-      transactionType: "purchase",
+      transactionType: { $in: COST_BEARING_TRANSACTIONS },
       remainingQuantity: { $gt: 0 },
     })
       .sort({ transactionDate: sortDir })
@@ -76,7 +84,7 @@ export const inventoryCostService = {
         itemType,
         itemId,
         locationId,
-        transactionType: "purchase",
+        transactionType: { $in: COST_BEARING_TRANSACTIONS },
         remainingQuantity: { $gte: quantity },
       }).session(session ?? null);
 

@@ -5,6 +5,7 @@ export interface BOMComponentResult {
   itemId: Types.ObjectId;
   quantity: number;
   unit?: string; // production unit chosen in BOM
+  wastagePercent?: number,  // <-- ADD THIS LINE
 }
 
 /* ----------------- Unit conversion helpers ----------------- */
@@ -82,6 +83,7 @@ export function calculateConsumption(
       itemId: comp.itemId,
       quantity: Number(baseQty.toFixed(6)), // preserve precision
       unit: comp.unit, // production unit from BOM
+      wastagePercent: comp.wastagePercent,  // <-- ADD THIS LINE
     });
   }
 

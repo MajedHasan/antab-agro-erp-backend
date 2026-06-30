@@ -1,6 +1,5 @@
 // src/services/ledger.service.ts
 import { Account } from "../models/account.model";
-import { Voucher } from "../models/voucher.model";
 import { VoucherLine } from "../models/voucher-line.model";
 import { Types } from "mongoose";
 
@@ -22,8 +21,8 @@ function formatTransaction(voucher: any, line: any) {
     id: `${String(voucher._id)}::${String(line._id)}`,
     entryId: voucher._id,
     accountId: String(line.accountId),
-    accountCode: "", // optional
-    accountName: "", // optional
+    accountCode: "",
+    accountName: "",
     date: voucher.date,
     description: line.narration || "",
     reference: voucher.reference || voucher.voucherNo || "",
@@ -44,14 +43,14 @@ function formatTransaction(voucher: any, line: any) {
   };
 }
 
-/* ---------------------------------------------------------------------------
-   Compute balances for all accounts for a given period.
-   Returns Map<accountId, {opening, periodDr, periodCr, closing}>
-   Uses only posted vouchers.
----------------------------------------------------------------------------- */
+/* ==================================================================
+   getBalancesForPeriod – corrected opening balance logic.
+   Opening = sum of (debit - credit) from all approved vouchers
+   **before** the from date. Period movements are within [from, to].
+================================================================== */
 export async function getBalancesForPeriod(from?: Date, to?: Date) {
   const pipeline: any[] = [
-    // Join voucher to get date and status
+    // Join voucher
     {
       $lookup: {
         from: "vouchers",
@@ -61,33 +60,21 @@ export async function getBalancesForPeriod(from?: Date, to?: Date) {
       },
     },
     { $unwind: "$voucher" },
-
-    // Only posted vouchers
+    // Only approved vouchers
     { $match: { "voucher.status": "Approved" } },
 
-    // Compute isOpening and isInPeriod flags
+    // Flags: isBeforePeriod, isInPeriod
     {
       $addFields: {
-        isOpening: {
-          $cond: [{ $eq: ["$voucher.type", "Opening"] }, 1, 0],
-        },
+        isBeforePeriod: from
+          ? { $cond: [{ $lt: ["$voucher.date", from] }, 1, 0] }
+          : 0,
         isInPeriod: {
           $cond: [
             {
               $and: [
-                { $ne: ["$voucher.type", "Opening"] },
-                from && to
-                  ? {
-                      $and: [
-                        { $gte: ["$voucher.date", from] },
-                        { $lte: ["$voucher.date", to] },
-                      ],
-                    }
-                  : from && !to
-                    ? { $gte: ["$voucher.date", from] }
-                    : !from && to
-                      ? { $lte: ["$voucher.date", to] }
-                      : true,
+                { $gte: ["$voucher.date", from || new Date(0)] },
+                { $lte: ["$voucher.date", to || new Date()] },
               ],
             },
             1,
@@ -101,9 +88,12 @@ export async function getBalancesForPeriod(from?: Date, to?: Date) {
     {
       $group: {
         _id: "$accountId",
-        openingSum: {
+        opening: {
           $sum: {
-            $multiply: ["$isOpening", { $subtract: ["$debit", "$credit"] }],
+            $multiply: [
+              "$isBeforePeriod",
+              { $subtract: ["$debit", "$credit"] },
+            ],
           },
         },
         periodDr: { $sum: { $multiply: ["$isInPeriod", "$debit"] } },
@@ -111,16 +101,16 @@ export async function getBalancesForPeriod(from?: Date, to?: Date) {
       },
     },
 
-    // Compute final balances
+    // Final projection
     {
       $project: {
         accountId: "$_id",
-        opening: { $ifNull: ["$openingSum", 0] },
+        opening: { $ifNull: ["$opening", 0] },
         periodDr: { $ifNull: ["$periodDr", 0] },
         periodCr: { $ifNull: ["$periodCr", 0] },
         closing: {
           $add: [
-            { $ifNull: ["$openingSum", 0] },
+            { $ifNull: ["$opening", 0] },
             {
               $subtract: [
                 { $ifNull: ["$periodDr", 0] },
@@ -133,7 +123,9 @@ export async function getBalancesForPeriod(from?: Date, to?: Date) {
     },
   ];
 
-  const rows = await VoucherLine.aggregate(pipeline).allowDiskUse(true).exec();
+  const rows = await VoucherLine.aggregate(pipeline)
+    .allowDiskUse(true)
+    .exec();
 
   const map = new Map<
     string,
@@ -163,20 +155,22 @@ export async function getAccountBalance(
   );
 }
 
-/* ---------------------------------------------------------------------------
+/* ==================================================================
    Ledger Service Object
----------------------------------------------------------------------------- */
+================================================================== */
 export const ledgerService = {
+  /** List all active COA accounts */
   async listAccounts() {
     return Account.find({ deletedAt: { $exists: false } })
       .sort({ code: 1 })
       .lean();
   },
 
+  /** Get paginated & filtered transactions for a single account */
   async getTransactionsForAccount(accountId: string, filter: TxFilter = {}) {
     const accountObjectId = new Types.ObjectId(accountId);
 
-    // 1️⃣ Compute opening balance
+    // 1️⃣ Compute opening balance (sum of all approved txs before from)
     let openingBalance = 0;
     if (filter.from) {
       const agg = await VoucherLine.aggregate([
@@ -208,7 +202,7 @@ export const ledgerService = {
         openingBalance = (agg[0].totalDebit || 0) - (agg[0].totalCredit || 0);
     }
 
-    // 2️⃣ Fetch lines for period
+    // 2️⃣ Fetch lines for the period
     const dateFilter: any = {};
     if (filter.from) dateFilter.$gte = filter.from;
     if (filter.to) dateFilter.$lte = filter.to;
@@ -310,11 +304,11 @@ export const ledgerService = {
     };
   },
 
+  /** Quick summary stats for a single account */
   async getLedgerSummary(accountId: string, from?: Date, to?: Date) {
     const accObj = await getAccountBalance(accountId, from, to);
     const account = await Account.findById(accountId).lean();
 
-    // Transaction count & average
     const pipeline: any[] = [
       { $match: { accountId: new Types.ObjectId(accountId) } },
       {
