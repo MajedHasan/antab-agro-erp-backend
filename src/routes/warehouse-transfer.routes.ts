@@ -1,3 +1,4 @@
+// src/routes/warehouse-transfer.routes.ts
 import { Router } from "express";
 import { warehouseTransferController } from "../controllers/warehouse-transfer.controller";
 import { createCrudRouter } from "./crud.routes";
@@ -27,8 +28,12 @@ router.post(
 
 router.post("/:id/dispatch", warehouseTransferController.dispatch);
 router.post("/:id/receive", warehouseTransferController.receive);
-router.post("/:id/cancel", warehouseTransferController.cancel);
-router.post("/:id/reject", warehouseTransferController.reject);
+
+// New workflow endpoints
+router.post("/:id/complete-received", warehouseTransferController.completeReceived);
+router.post("/:id/reverse-remaining", warehouseTransferController.reverseRemaining);
+router.post("/:id/damage-remaining", warehouseTransferController.damageRemaining);
+router.post("/:id/add-more-received", warehouseTransferController.addMoreReceived);
 
 /* ==========================================================
    CRUD ROUTES

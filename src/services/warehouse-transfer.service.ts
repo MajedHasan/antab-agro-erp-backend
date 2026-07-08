@@ -1,3 +1,4 @@
+// src/services/warehouse-transfer.service.ts
 import mongoose, { ClientSession, Types } from "mongoose";
 import { createCrudService } from "./crud.service";
 import WarehouseTransfer, {
@@ -9,6 +10,13 @@ import WarehouseTransfer, {
   TransferType,
 } from "../models/warehouse-transfer.model";
 import ProductStock from "../models/productStock.model";
+import { stockTransactionService } from "../modules/stockTransaction/stockTransaction.service";
+import { reservationService } from "../modules/stockTransaction/reservation.service";
+import { inventoryCostService } from "../modules/stockTransaction/inventoryCost.service";
+import { voucherService } from "./voucher.service";
+import { accountService } from "./account.service";
+import Product from "../models/product.model";
+import WarehouseOrFactory from "../models/warehouseOrFactory.model";
 
 type UserCtx = {
   userId: string;
@@ -49,11 +57,12 @@ type StagePayload = {
 type ReceivePayload = {
   mediaId: string;
   remarks?: string;
+  items: { productId: string; receivedQty: number }[];
 };
 
 const POPULATE = [
-  { path: "sender" },
-  { path: "receiver" },
+  { path: "sender", select: "name code type _id" },
+  { path: "receiver", select: "name code type _id" },
   { path: "createdBy", select: "name email role" },
   { path: "receiverNsmApprovedBy", select: "name email role" },
   { path: "senderReviewedBy", select: "name email role" },
@@ -77,6 +86,7 @@ const crudBase = createCrudService(WarehouseTransfer, {
   ],
 });
 
+// ─── helpers ───────────────────────────────────────────
 function now() {
   return new Date();
 }
@@ -106,6 +116,7 @@ function getRole(user?: UserCtx) {
   return user?.role || "USER";
 }
 
+/** Extract a human-readable location name from a populated or raw object */
 function locationName(loc: any) {
   return (
     loc?.name ||
@@ -113,8 +124,14 @@ function locationName(loc: any) {
     loc?.factoryName ||
     loc?.title ||
     loc?.code ||
-    String(loc?._id || "")
+    (typeof loc === "string" ? loc : String(loc?._id || ""))
   );
+}
+
+/** Fetch a product name (with optional cache, but here we just do a DB lookup) */
+async function productName(id: string, session?: ClientSession): Promise<string> {
+  const product = await Product.findById(id).session(session ?? null).lean();
+  return product?.name || `Unknown Product (${id})`;
 }
 
 function calcAvailable(stock: any) {
@@ -148,22 +165,19 @@ function canDispatchTransfer(transfer: any) {
   if (isWarehouseToWarehouse(transfer)) {
     return transfer.status === "SENDER_NSM_APPROVED";
   }
-
   if (isFactoryRequestTransfer(transfer)) {
     return transfer.status === "RECEIVER_NSM_APPROVED";
   }
-
   if (isDirectFactoryTransfer(transfer)) {
-    return transfer.status === "DRAFT";
+    return transfer.status === "REQUESTED";
   }
-
   return false;
 }
 
 function addLog(
   transfer: IWarehouseTransfer,
   user: UserCtx,
-  status: TransferStatus | "CREATED" | "UPDATED" | "DRAFT",
+  status: TransferStatus | "CREATED" | "UPDATED",
   remarks?: string,
 ) {
   transfer.approvalLogs.push({
@@ -179,11 +193,11 @@ function buildSnapshot(transfer: any, user: UserCtx) {
   return {
     transferNo: transfer.transferNo,
     sender: {
-      id: transfer.sender?._id || transfer.sender,
+      id: transfer.sender?._id?.toString() || transfer.sender,
       name: locationName(transfer.sender),
     },
     receiver: {
-      id: transfer.receiver?._id || transfer.receiver,
+      id: transfer.receiver?._id?.toString() || transfer.receiver,
       name: locationName(transfer.receiver),
     },
     items: (transfer.items || []).map((item: any) => ({
@@ -215,10 +229,12 @@ function buildItemsFromPayload(
 
   return incomingItems.map((incoming) => {
     const productId = asObjectId(String(incoming.productId));
+
     const requestedQty = normalizeQty(
       incoming.requestedQty ?? incoming.quantity ?? incoming.finalQty,
       "requestedQty",
     );
+
     const finalQty = normalizeQty(
       incoming.finalQty ?? incoming.quantity ?? incoming.requestedQty,
       "finalQty",
@@ -275,13 +291,56 @@ async function getTransferById(id: string, session?: ClientSession) {
   return query.exec();
 }
 
+// ──────────── Batch‑level reservation helpers ────────────
+async function reserveBatchStock(doc: any, userId: string, session: ClientSession) {
+  const ids: Types.ObjectId[] = [];
+  for (const item of doc.items) {
+    const productId = String(item.productId);
+    const qty = item.finalQty;
+    const senderId = String(doc.sender?._id || doc.sender);
+
+    const { reservationId } = await reservationService.reserve(
+      "Product",
+      productId,
+      senderId,
+      qty,
+      "FIFO",
+      String(doc._id),
+      "WarehouseTransfer",
+      userId,
+      session,
+    );
+    ids.push(reservationId);
+  }
+  doc.reservationIds = ids;
+}
+
+async function releaseBatchReservation(doc: any, session: ClientSession) {
+  if (!doc.reservationIds?.length) return;
+  for (const reservationId of doc.reservationIds) {
+    await reservationService.release(
+      reservationId,
+      "transfer_out",
+      String(doc._id),
+      "WarehouseTransfer",
+      ProductStock,
+      "warehouseId",
+      "",
+      session,
+      true, // cancelOnly
+    );
+  }
+  doc.reservationIds = [];
+}
+
+// ─── Aggregated ProductStock helpers ────────────────────
 async function reserveVirtualStock(transfer: any, session: ClientSession) {
   for (const item of transfer.items) {
     const qty = item.finalQty;
 
     const sourceStock = await ProductStock.findOne({
       productId: item.productId,
-      warehouseId: transfer.sender,
+      warehouseId: transfer.sender?._id?.toString(),
     }).session(session);
 
     if (!sourceStock) {
@@ -294,32 +353,14 @@ async function reserveVirtualStock(transfer: any, session: ClientSession) {
     }
 
     await ProductStock.findOneAndUpdate(
-      {
-        productId: item.productId,
-        warehouseId: transfer.sender,
-      },
-      {
-        $inc: { reservedForTransfer: qty },
-        $set: { lastUpdated: now() },
-      },
+      { productId: item.productId, warehouseId: transfer.sender?._id?.toString() },
+      { $inc: { reservedForTransfer: qty }, $set: { lastUpdated: now() } },
       { session },
     );
 
     await ProductStock.findOneAndUpdate(
-      {
-        productId: item.productId,
-        warehouseId: transfer.receiver,
-      },
-      {
-        $inc: { incomingTransfer: qty },
-        $setOnInsert: {
-          quantity: 0,
-          reservedForSales: 0,
-          reservedForTransfer: 0,
-          // incomingTransfer: 0,
-        },
-        $set: { lastUpdated: now() },
-      },
+      { productId: item.productId, warehouseId: transfer.receiver?._id?.toString() },
+      { $inc: { incomingTransfer: qty }, $setOnInsert: { quantity: 0, reservedForSales: 0, reservedForTransfer: 0 }, $set: { lastUpdated: now() } },
       { upsert: true, session },
     );
   }
@@ -330,26 +371,14 @@ async function releaseVirtualStock(transfer: any, session: ClientSession) {
     const qty = item.finalQty;
 
     await ProductStock.findOneAndUpdate(
-      {
-        productId: item.productId,
-        warehouseId: transfer.sender,
-      },
-      {
-        $inc: { reservedForTransfer: -qty },
-        $set: { lastUpdated: now() },
-      },
+      { productId: item.productId, warehouseId: transfer.sender?._id?.toString() },
+      { $inc: { reservedForTransfer: -qty }, $set: { lastUpdated: now() } },
       { session },
     );
 
     await ProductStock.findOneAndUpdate(
-      {
-        productId: item.productId,
-        warehouseId: transfer.receiver,
-      },
-      {
-        $inc: { incomingTransfer: -qty },
-        $set: { lastUpdated: now() },
-      },
+      { productId: item.productId, warehouseId: transfer.receiver?._id?.toString() },
+      { $inc: { incomingTransfer: -qty }, $set: { lastUpdated: now() } },
       { session },
     );
   }
@@ -361,7 +390,7 @@ async function finalizePhysicalStock(transfer: any, session: ClientSession) {
 
     const sourceStock = await ProductStock.findOne({
       productId: item.productId,
-      warehouseId: transfer.sender,
+      warehouseId: transfer.sender?._id?.toString(),
     }).session(session);
 
     if (!sourceStock) {
@@ -369,47 +398,159 @@ async function finalizePhysicalStock(transfer: any, session: ClientSession) {
     }
 
     if ((sourceStock.quantity || 0) < qty) {
-      throw new Error(
-        `Insufficient physical stock for product ${item.productId}`,
-      );
+      throw new Error(`Insufficient physical stock for product ${item.productId}`);
     }
 
     await ProductStock.findOneAndUpdate(
-      {
-        productId: item.productId,
-        warehouseId: transfer.sender,
-      },
-      {
-        $inc: {
-          quantity: -qty,
-          reservedForTransfer: -qty,
-        },
-        $set: { lastUpdated: now() },
-      },
+      { productId: item.productId, warehouseId: transfer.sender?._id?.toString() },
+      { $inc: { quantity: -qty, reservedForTransfer: -qty }, $set: { lastUpdated: now() } },
       { session },
     );
 
     await ProductStock.findOneAndUpdate(
-      {
-        productId: item.productId,
-        warehouseId: transfer.receiver,
-      },
-      {
-        $inc: {
-          quantity: qty,
-          incomingTransfer: -qty,
-        },
-        $setOnInsert: {
-          // quantity: 0,
-          reservedForSales: 0,
-          reservedForTransfer: 0,
-          // incomingTransfer: 0,
-        },
-        $set: { lastUpdated: now() },
-      },
+      { productId: item.productId, warehouseId: transfer.receiver?._id?.toString() },
+      { $inc: { quantity: qty, incomingTransfer: -qty }, $setOnInsert: { reservedForSales: 0, reservedForTransfer: 0 }, $set: { lastUpdated: now() } },
       { upsert: true, session },
     );
   }
+}
+
+async function finalizeReceivedStock(transfer: any, session: ClientSession) {
+  for (const item of transfer.items) {
+    const qty = item.receivedQty || 0;
+    if (qty <= 0) continue;
+    const sourceStock = await ProductStock.findOne({
+      productId: item.productId,
+      warehouseId: transfer.sender,
+    }).session(session);
+    if (!sourceStock) throw new Error(`Source stock not found for ${item.productId}`);
+    if ((sourceStock.quantity || 0) < qty) throw new Error(`Insufficient stock for ${item.productId}`);
+
+    await ProductStock.findOneAndUpdate(
+      { productId: item.productId, warehouseId: transfer.sender },
+      { $inc: { quantity: -qty, reservedForTransfer: -qty }, $set: { lastUpdated: now() } },
+      { session },
+    );
+    await ProductStock.findOneAndUpdate(
+      { productId: item.productId, warehouseId: transfer.receiver },
+      { $inc: { quantity: qty, incomingTransfer: -qty }, $setOnInsert: { reservedForSales: 0, reservedForTransfer: 0 }, $set: { lastUpdated: now() } },
+      { upsert: true, session },
+    );
+  }
+}
+
+// ─── Accounting helpers ─────────────────────────────────
+async function getProductLocationAccount(
+  productId: string,
+  locationId: string,
+  session?: ClientSession,
+) {
+  const prod = await Product.findById(productId).session(session ?? null).lean();
+  if (!prod) throw new Error("Product not found");
+  const loc = await WarehouseOrFactory.findById(locationId).session(session ?? null).lean();
+  if (!loc) throw new Error("Location not found");
+  return (accountService as any).getAccountByPath(
+    ["Assets", "Current Assets", "Inventory", "Finished Goods", prod.name],
+    "Asset",
+    { session },
+  );
+}
+
+async function getDamageLossAccount(productName: string, session?: ClientSession) {
+  return (accountService as any).getAccountByPath(
+    ["Expense", "Cost of Goods Sold", "Goods Damage", productName],
+    "Expense",
+    { session },
+  );
+}
+
+// ─── Core business logic ────────────────────────────────
+/**
+ * Create stock transactions and a balanced accounting voucher.
+ * @param transfer - fully populated transfer document
+ * @param userId - user performing the action
+ * @param useReceivedQty - if true, use receivedQty; else finalQty
+ */
+async function createStockTransactionsAndVoucher(
+  transfer: any,
+  userId: string,
+  useReceivedQty: boolean,
+  session: ClientSession,
+) {
+  const voucherLines: any[] = [];
+  const senderName = locationName(transfer.sender);
+  const receiverName = locationName(transfer.receiver);
+
+  for (const item of transfer.items) {
+    const qty = useReceivedQty ? (item.receivedQty || 0) : item.finalQty;
+    if (qty <= 0) continue;
+
+    const prodId = String(item.productId?._id || item.productId);
+    const senderId = String(transfer.sender?._id || transfer.sender);
+    const receiverId = String(transfer.receiver?._id || transfer.receiver);
+
+    // Resolve product name (populated or fetch)
+    const pName = item.productId?.name || (await productName(prodId, session));
+
+    const { totalCost } = await inventoryCostService.consume("Product", prodId, senderId, qty, "FIFO", session);
+    const unitCost = totalCost / qty;
+
+    // Stock movement records
+    await stockTransactionService.create({
+      itemType: "Product",
+      itemId: prodId,
+      locationId: senderId,
+      transactionType: "transfer_out",
+      quantity: -qty,
+      unitCost,
+      totalCost,
+      transactionDate: now(),
+      createdBy: userId,
+      remainingQuantity: 0,
+    }, session);
+
+    await stockTransactionService.create({
+      itemType: "Product",
+      itemId: prodId,
+      locationId: receiverId,
+      transactionType: "transfer_in",
+      quantity: qty,
+      unitCost,
+      totalCost,
+      transactionDate: now(),
+      createdBy: userId,
+      remainingQuantity: qty,
+    }, session);
+
+    // Voucher lines – now with clean names
+    const senderAccount = await getProductLocationAccount(prodId, senderId, session);
+    const receiverAccount = await getProductLocationAccount(prodId, receiverId, session);
+
+    voucherLines.push({
+      accountId: receiverAccount._id,
+      debit: totalCost,
+      credit: 0,
+      narration: `Transfer in of ${pName} from ${senderName} to ${receiverName}`,
+    });
+    voucherLines.push({
+      accountId: senderAccount._id,
+      debit: 0,
+      credit: totalCost,
+      narration: `Transfer out of ${pName} to ${receiverName} from ${senderName}`,
+    });
+  }
+
+  // Create the voucher
+  const voucher = await voucherService.create({
+    voucherNo: `TR-${transfer.transferNo}-${Date.now()}`,
+    date: now(),
+    type: "Journal",
+    narration: `Stock transfer ${transfer.transferNo} from ${senderName} to ${receiverName}`,
+    lines: voucherLines,
+    status: "Approved",
+    createdBy: userId,
+  }, session);
+  transfer.voucherId = voucher._id;
 }
 
 function normalizeUser(user?: UserCtx) {
@@ -453,7 +594,7 @@ async function createTransferDoc(
         sender: payload.sender,
         receiver: payload.receiver,
         items,
-        status: "DRAFT",
+        status: "REQUESTED",
         locked: false,
         createdBy: asObjectId(actor.userId),
         approvalLogs: [],
@@ -466,6 +607,7 @@ async function createTransferDoc(
 
   if (isDirectFactoryTransfer(doc)) {
     await reserveVirtualStock(doc, session);
+    await reserveBatchStock(doc, actor.userId, session);
   }
 
   await doc.save({ session });
@@ -492,20 +634,19 @@ async function updateTransferDoc(
     throw new Error("Warehouse to warehouse transfer must be REQUEST mode");
   }
 
-  if (doc.status !== "DRAFT" || doc.locked) {
+  if (doc.status !== "REQUESTED" || doc.locked) {
     throw new Error("Only draft transfers can be updated");
   }
 
   const directBefore = isDirectFactoryTransfer(doc);
   if (directBefore) {
     await releaseVirtualStock(doc, session);
+    await releaseBatchReservation(doc, session);
   }
 
   if (payload.transferNo !== undefined) doc.transferNo = payload.transferNo;
-  if (payload.transferType !== undefined)
-    doc.transferType = payload.transferType;
-  if (payload.transferMode !== undefined)
-    doc.transferMode = payload.transferMode;
+  if (payload.transferType !== undefined) doc.transferType = payload.transferType;
+  if (payload.transferMode !== undefined) doc.transferMode = payload.transferMode;
   if (payload.sender !== undefined) doc.sender = payload.sender;
   if (payload.receiver !== undefined) doc.receiver = payload.receiver;
 
@@ -522,6 +663,7 @@ async function updateTransferDoc(
 
   if (isDirectFactoryTransfer(doc)) {
     await reserveVirtualStock(doc, session);
+    await reserveBatchStock(doc, actor.userId, session);
   }
 
   await doc.save({ session });
@@ -532,7 +674,7 @@ async function removeTransferDoc(id: string, session: ClientSession) {
   const doc = await WarehouseTransfer.findById(id).session(session);
   if (!doc) throw new Error("Transfer not found");
 
-  if (doc.status === "DISPATCHED" || doc.status === "COMPLETED") {
+  if (doc.status === "SENT" || doc.status === "COMPLETED") {
     throw new Error("Cannot delete after dispatch");
   }
 
@@ -542,12 +684,14 @@ async function removeTransferDoc(id: string, session: ClientSession) {
     doc.status === "SENDER_NSM_APPROVED"
   ) {
     await releaseVirtualStock(doc, session);
+    await releaseBatchReservation(doc, session);
   }
 
   await WarehouseTransfer.findByIdAndDelete(id, { session });
   return { deleted: true };
 }
 
+// ─── Public service object ──────────────────────────────
 export const warehouseTransferCrudService = crudBase;
 
 export const warehouseTransferService = {
@@ -631,7 +775,7 @@ export const warehouseTransferService = {
       const doc = await WarehouseTransfer.findById(id).session(session);
       if (!doc) throw new Error("Transfer not found");
 
-      if (doc.status !== "DRAFT") {
+      if (doc.status !== "REQUESTED") {
         throw new Error("Transfer is not in draft stage");
       }
 
@@ -650,7 +794,9 @@ export const warehouseTransferService = {
       } else if (isFactoryRequestTransfer(doc)) {
         doc.status = "RECEIVER_NSM_APPROVED";
         doc.locked = true;
+
         await reserveVirtualStock(doc, session);
+        await reserveBatchStock(doc, actor.userId, session);
       } else {
         throw new Error(
           "Receiver NSM approval is not valid for this transfer type",
@@ -729,6 +875,7 @@ export const warehouseTransferService = {
       }
 
       await reserveVirtualStock(doc, session);
+      await reserveBatchStock(doc, actor.userId, session);
 
       doc.status = "SENDER_NSM_APPROVED";
       doc.locked = true;
@@ -752,15 +899,11 @@ export const warehouseTransferService = {
 
       const canPrint =
         (isWarehouseToWarehouse(doc) &&
-          ["SENDER_NSM_APPROVED", "DISPATCHED", "COMPLETED"].includes(
-            doc.status,
-          )) ||
+          ["SENDER_NSM_APPROVED", "SENT", "COMPLETED"].includes(doc.status)) ||
         (isFactoryRequestTransfer(doc) &&
-          ["RECEIVER_NSM_APPROVED", "DISPATCHED", "COMPLETED"].includes(
-            doc.status,
-          )) ||
+          ["RECEIVER_NSM_APPROVED", "SENT", "COMPLETED"].includes(doc.status)) ||
         (isDirectFactoryTransfer(doc) &&
-          ["DRAFT", "DISPATCHED", "COMPLETED"].includes(doc.status));
+          ["REQUESTED", "SENT", "COMPLETED"].includes(doc.status));
 
       if (!canPrint) {
         throw new Error("Transfer is not ready for print snapshot");
@@ -790,26 +933,30 @@ export const warehouseTransferService = {
         doc.printSnapshot = buildSnapshot(doc, actor);
       }
 
-      doc.status = "DISPATCHED";
+      doc.status = "SENT";
       doc.locked = true;
       doc.dispatchedBy = asObjectId(actor.userId);
       doc.dispatchedAt = now();
 
-      addLog(doc, actor, "DISPATCHED");
+      addLog(doc, actor, "SENT");
 
       await doc.save({ session });
       return getTransferById(String(doc._id), session);
     });
   },
 
+  // ─── Receive (with partial support) ────────────────────
   async receive(id: string, payload: ReceivePayload, user: UserCtx) {
     return withTransaction(async (session) => {
       const actor = normalizeUser(user);
-      const doc = await WarehouseTransfer.findById(id).session(session);
+      const doc = await WarehouseTransfer.findById(id)
+        .populate(POPULATE)
+        .session(session);
+
       if (!doc) throw new Error("Transfer not found");
 
-      if (doc.status !== "DISPATCHED") {
-        throw new Error("Transfer must be dispatched before receiving");
+      if (doc.status !== "SENT") {
+        throw new Error("Transfer must be sent before receiving");
       }
 
       if (!payload?.mediaId) {
@@ -820,7 +967,29 @@ export const warehouseTransferService = {
         throw new Error("Print snapshot is required before receiving");
       }
 
-      await finalizePhysicalStock(doc, session);
+      // Update received quantities
+      for (const incoming of payload.items) {
+        const item = doc.items.find((i: any) => String(i.productId?._id) === incoming.productId);
+        if (!item) throw new Error(`Product ${incoming.productId} not in transfer`);
+        item.receivedQty = (item.receivedQty || 0) + Number(incoming.receivedQty);
+      }
+
+      const allFullyReceived = doc.items.every((item: any) => (item.receivedQty || 0) >= item.finalQty);
+
+      if (allFullyReceived) {
+        await releaseBatchReservation(doc, session);
+        await finalizePhysicalStock(doc, session);
+        await createStockTransactionsAndVoucher(doc, actor.userId, false, session);
+        doc.status = "COMPLETED";
+        doc.receivedBy = asObjectId(actor.userId);
+        doc.receivedAt = now();
+        addLog(doc, actor, "COMPLETED", payload.remarks);
+      } else {
+        doc.status = "HOLD";
+        doc.receivedBy = asObjectId(actor.userId);
+        doc.receivedAt = now();
+        addLog(doc, actor, "HOLD", payload.remarks || "Partial receipt – on hold");
+      }
 
       doc.documents = {
         ...(doc.documents || {}),
@@ -832,73 +1001,263 @@ export const warehouseTransferService = {
         },
       };
 
+      await doc.save({ session });
+      return getTransferById(String(doc._id), session);
+    });
+  },
+
+  // ─── Complete Received (HOLD → AWAITING_REMAINING) ─────
+  async completeReceived(id: string, remarks: string | undefined, user: UserCtx) {
+    return withTransaction(async (session) => {
+      const actor = normalizeUser(user);
+      const doc = await WarehouseTransfer.findById(id).populate(POPULATE).session(session);
+      if (!doc) throw new Error("Transfer not found");
+      if (doc.status !== "HOLD") throw new Error("Transfer is not on hold");
+
+      await releaseBatchReservation(doc, session);
+      await finalizeReceivedStock(doc, session);
+      await createStockTransactionsAndVoucher(doc, actor.userId, true, session);
+
+      doc.status = "AWAITING_REMAINING";
+      addLog(doc, actor, "AWAITING_REMAINING", remarks || "Received quantities processed");
+      await doc.save({ session });
+      return getTransferById(String(doc._id), session);
+    });
+  },
+
+  // ─── Reverse Remaining ─────────────────────────────────
+  async reverseRemaining(id: string, remarks: string | undefined, user: UserCtx) {
+    return withTransaction(async (session) => {
+      const actor = normalizeUser(user);
+      const doc = await WarehouseTransfer.findById(id).populate(POPULATE).session(session);
+      if (!doc) throw new Error("Transfer not found");
+      if (doc.status !== "AWAITING_REMAINING") throw new Error("Transfer must be awaiting remaining");
+
+      for (const item of doc.items) {
+        const received = item.receivedQty || 0;
+        const short = item.finalQty - received;
+        if (short > 0) {
+          await ProductStock.findOneAndUpdate(
+            { productId: item.productId?._id, warehouseId: doc.sender?._id },
+            { $inc: { reservedForTransfer: -short } },
+            { session },
+          );
+          await ProductStock.findOneAndUpdate(
+            { productId: item.productId?._id, warehouseId: doc.receiver?._id },
+            { $inc: { incomingTransfer: -short } },
+            { session },
+          );
+        }
+      }
+
       doc.status = "COMPLETED";
-      doc.receivedBy = asObjectId(actor.userId);
-      doc.receivedAt = now();
-
-      addLog(doc, actor, "COMPLETED", payload.remarks);
-
+      addLog(doc, actor, "COMPLETED", remarks || "Remaining reversed");
       await doc.save({ session });
       return getTransferById(String(doc._id), session);
     });
   },
 
-  async cancel(id: string, payload: { reason?: string }, user: UserCtx) {
+  // ─── Damage Remaining (with voucher) ───────────────────
+  async damageRemaining(id: string, payload: { mediaId: string; reason?: string }, user: UserCtx) {
     return withTransaction(async (session) => {
       const actor = normalizeUser(user);
-      const doc = await WarehouseTransfer.findById(id).session(session);
+      const doc = await WarehouseTransfer.findById(id).populate(POPULATE).session(session);
       if (!doc) throw new Error("Transfer not found");
+      if (doc.status !== "AWAITING_REMAINING")
+        throw new Error("Transfer must be awaiting remaining");
 
-      if (doc.status === "DISPATCHED" || doc.status === "COMPLETED") {
-        throw new Error("Cannot cancel after dispatch");
+      // Build damage map
+      const damageQtyByProduct: Record<string, number> = {};
+      for (const item of doc.items) {
+        const received = item.receivedQty || 0;
+        const short = item.finalQty - received;
+        if (short > 0) {
+          damageQtyByProduct[String(item.productId?._id)] = (damageQtyByProduct[String(item.productId?._id)] || 0) + short;
+        }
+      }
+      if (Object.keys(damageQtyByProduct).length === 0)
+        throw new Error("No undelivered quantity to damage");
+
+      const voucherLines: any[] = [];
+
+      for (const [prodId, qty] of Object.entries(damageQtyByProduct)) {
+        const senderId = String(doc.sender?._id || doc.sender);
+        const receiverId = String(doc.receiver?._id || doc.receiver);
+
+        // Product name for voucher
+        const product = await Product.findById(prodId).session(session).lean();
+        if (!product) throw new Error(`Product ${prodId} not found`);
+        const pName = product.name;
+
+        // Adjust sender stock: physical loss + release reservation
+        await ProductStock.findOneAndUpdate(
+          { productId: prodId, warehouseId: senderId },
+          { $inc: { quantity: -qty, reservedForTransfer: -qty }, $set: { lastUpdated: now() } },
+          { session },
+        );
+
+        // Adjust receiver: cancel incoming transfer
+        await ProductStock.findOneAndUpdate(
+          { productId: prodId, warehouseId: receiverId },
+          { $inc: { incomingTransfer: -qty }, $set: { lastUpdated: now() } },
+          { session },
+        );
+
+        // Cost consumption
+        const { totalCost } = await inventoryCostService.consume("Product", prodId, senderId, qty, "FIFO", session);
+
+        // Wastage stock transaction
+        await stockTransactionService.create({
+          itemType: "Product",
+          itemId: prodId,
+          locationId: senderId,
+          transactionType: "wastage",
+          quantity: -qty,
+          unitCost: totalCost / qty,
+          totalCost,
+          transactionDate: now(),
+          createdBy: actor.userId,
+          remainingQuantity: 0,
+          sourceId: doc._id,
+          sourceModel: "WarehouseTransfer",
+        }, session);
+
+        // Voucher entries
+        const senderAccount = await getProductLocationAccount(prodId, senderId, session);
+        const damageAccount = await getDamageLossAccount(pName, session);
+
+        voucherLines.push({
+          accountId: damageAccount._id,
+          debit: totalCost,
+          credit: 0,
+          narration: `Goods damaged in transit: ${pName} – Transfer ${doc.transferNo}`,
+        });
+        voucherLines.push({
+          accountId: senderAccount._id,
+          debit: 0,
+          credit: totalCost,
+          narration: `Inventory write-off for damaged ${pName} – Transfer ${doc.transferNo}`,
+        });
       }
 
-      if (
-        doc.status === "RECEIVER_NSM_APPROVED" ||
-        doc.status === "SENDER_NSM_APPROVED" ||
-        isDirectFactoryTransfer(doc)
-      ) {
-        await releaseVirtualStock(doc, session);
+      if (voucherLines.length > 0) {
+        await voucherService.create({
+          voucherNo: `DMG-${doc.transferNo}-${Date.now()}`,
+          date: now(),
+          type: "Journal",
+          narration: `Damage write-off for transfer ${doc.transferNo} – ${payload.reason || "Damaged during transit"}`,
+          lines: voucherLines,
+          status: "Approved",
+          createdBy: actor.userId,
+        }, session);
       }
 
-      doc.status = "CANCELLED";
-      doc.locked = true;
-      doc.cancelledBy = asObjectId(actor.userId);
-      doc.cancelledAt = now();
-      doc.cancelReason = payload?.reason || "Cancelled";
-
-      addLog(doc, actor, "CANCELLED", payload?.reason);
-
+      // Mark completed & attach damage doc
+      doc.status = "COMPLETED";
+      doc.documents = {
+        ...(doc.documents || {}),
+        damage: {
+          mediaId: asObjectId(payload.mediaId),
+          uploadedBy: asObjectId(actor.userId),
+          uploadedByName: actor.name || actor.userId,
+          uploadedAt: now(),
+          reason: payload.reason || "Damaged during transit",
+        },
+      };
+      addLog(doc, actor, "COMPLETED", "Remaining damaged and transfer completed");
       await doc.save({ session });
+
       return getTransferById(String(doc._id), session);
     });
   },
 
-  async reject(id: string, payload: { reason?: string }, user: UserCtx) {
+  // ─── Add More Received ─────────────────────────────────
+  async addMoreReceived(id: string, payload: { items: { productId: string; additionalQty: number }[] }, user: UserCtx) {
     return withTransaction(async (session) => {
       const actor = normalizeUser(user);
-      const doc = await WarehouseTransfer.findById(id).session(session);
+      const doc = await WarehouseTransfer.findById(id).populate(POPULATE).session(session);
       if (!doc) throw new Error("Transfer not found");
+      if (doc.status !== "AWAITING_REMAINING") throw new Error("Transfer must be awaiting remaining");
 
-      if (doc.status === "DISPATCHED" || doc.status === "COMPLETED") {
-        throw new Error("Cannot reject after dispatch");
+      const addMap: Record<string, number> = {};
+      for (const inc of payload.items) {
+        const item = doc.items.find((i: any) => String(i.productId?._id) === inc.productId);
+
+        if (!item) throw new Error(`Product ${inc.productId} not in transfer`);
+        const addQty = Number(inc.additionalQty);
+        if (addQty <= 0) continue;
+        addMap[String(item.productId?._id)] = (addMap[String(item.productId?._id)] || 0) + addQty;
+        item.receivedQty = (item.receivedQty || 0) + addQty;
       }
 
-      if (
-        doc.status === "RECEIVER_NSM_APPROVED" ||
-        doc.status === "SENDER_NSM_APPROVED" ||
-        isDirectFactoryTransfer(doc)
-      ) {
-        await releaseVirtualStock(doc, session);
+      if (Object.keys(addMap).length === 0) throw new Error("No additional quantity provided");
+
+      for (const [prodId, qty] of Object.entries(addMap)) {
+        const senderId = String(doc.sender?._id || doc.sender);
+        const receiverId = String(doc.receiver?._id || doc.receiver);
+
+        // Fetch product name for voucher narration
+        const product = await Product.findById(prodId).session(session).lean();
+        const pName = product?.name || "Unknown Product";
+
+        await ProductStock.findOneAndUpdate(
+          { productId: prodId, warehouseId: senderId },
+          { $inc: { quantity: -qty, reservedForTransfer: -qty } },
+          { session },
+        );
+        await ProductStock.findOneAndUpdate(
+          { productId: prodId, warehouseId: receiverId },
+          { $inc: { quantity: qty, incomingTransfer: -qty } },
+          { session },
+        );
+
+        const { totalCost } = await inventoryCostService.consume("Product", prodId, senderId, qty, "FIFO", session);
+        const unitCost = totalCost / qty;
+
+        await stockTransactionService.create({
+          itemType: "Product", itemId: prodId, locationId: senderId,
+          transactionType: "transfer_out", quantity: -qty, unitCost, totalCost,
+          transactionDate: now(), createdBy: actor.userId, remainingQuantity: 0,
+        }, session);
+        await stockTransactionService.create({
+          itemType: "Product", itemId: prodId, locationId: receiverId,
+          transactionType: "transfer_in", quantity: qty, unitCost, totalCost,
+          transactionDate: now(), createdBy: actor.userId, remainingQuantity: qty,
+        }, session);
+
+        // Voucher for additional qty – now with real names
+        const senderAccount = await getProductLocationAccount(prodId, senderId, session);
+        const receiverAccount = await getProductLocationAccount(prodId, receiverId, session);
+
+        await voucherService.create({
+          voucherNo: `TR-${doc.transferNo}-ADD-${Date.now()}`,
+          date: now(),
+          type: "Journal",
+          narration: `Additional stock received for transfer ${doc.transferNo} from ${locationName(doc.sender)} to ${locationName(doc.receiver)}`,
+          lines: [
+            {
+              accountId: receiverAccount._id,
+              debit: totalCost,
+              credit: 0,
+              narration: `Additional transfer in of ${pName} from ${locationName(doc.sender)} to ${locationName(doc.receiver)}`,
+            },
+            {
+              accountId: senderAccount._id,
+              debit: 0,
+              credit: totalCost,
+              narration: `Additional transfer out of ${pName} to ${locationName(doc.receiver)} from ${locationName(doc.sender)}`,
+            },
+          ],
+          status: "Approved",
+          createdBy: actor.userId,
+        }, session);
       }
 
-      doc.status = "REJECTED";
-      doc.locked = true;
-      doc.rejectedBy = asObjectId(actor.userId);
-      doc.rejectedAt = now();
-      doc.rejectReason = payload?.reason || "Rejected";
-
-      addLog(doc, actor, "REJECTED", payload?.reason);
+      const allFullyReceived = doc.items.every((item: any) => (item.receivedQty || 0) >= item.finalQty);
+      if (allFullyReceived) {
+        doc.status = "COMPLETED";
+        addLog(doc, actor, "COMPLETED", "All remaining quantities now received");
+      }
 
       await doc.save({ session });
       return getTransferById(String(doc._id), session);

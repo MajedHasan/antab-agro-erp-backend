@@ -1,3 +1,4 @@
+// src/modules/stockTransaction/reservation.service.ts
 import { StockTransaction } from "./stockTransaction.model";
 import { ClientSession } from "mongoose";
 
@@ -20,11 +21,12 @@ export const reservationService = {
     session?: ClientSession,
   ) {
     const sortDir = method === "FIFO" ? 1 : -1;
+
     const batches = await StockTransaction.find({
       itemType,
       itemId,
       locationId,
-      transactionType: "purchase",
+      transactionType: { $in: ["purchase", "production_return", "transfer_in", "production", "return"] },
       $expr: { $gt: [{ $subtract: ["$remainingQuantity", "$reserved"] }, 0] },
     })
       .sort({ transactionDate: sortDir })
@@ -82,25 +84,48 @@ export const reservationService = {
   },
 
   /**
-   * Release a reservation and create the actual movement transaction.
+   * Release a reservation.
+   *
+   * When `cancelOnly` is `false` (default): performs a full release – decreases
+   * reserved and remaining quantities on the batches, deducts aggregated stock,
+   * creates the movement transaction, and marks the reservation as fulfilled.
+   *
+   * When `cancelOnly` is `true`: only decrements `reserved` on the batches
+   * and deletes the reservation transaction. No stock movement or aggregated
+   * stock change occurs. Useful when cancelling or rejecting a transfer/sale.
    */
   async release(
     reservationId: string,
-    realTransactionType: string, // "sale", "transfer_out", etc.
+    realTransactionType: string,
     realSourceId: string,
     realSourceModel: string,
     StockModel: any,
     idField: string,
     createdBy: string,
     session?: ClientSession,
+    cancelOnly = false,   // <-- new parameter, default false to preserve existing behaviour
   ) {
-    const reservation = await StockTransaction.findById(reservationId).session(
-      session ?? null,
-    );
+    const reservation = await StockTransaction.findById(reservationId).session(session ?? null);
     if (!reservation || !reservation.batchDetails)
       throw new Error("Reservation not found or corrupted");
 
     const batchDetails = reservation.batchDetails as any[];
+
+    if (cancelOnly) {
+      // --- cancel‑only mode: just free the reservation, no stock movement ---
+      for (const detail of batchDetails) {
+        await StockTransaction.findByIdAndUpdate(
+          detail.batchId,
+          { $inc: { reserved: -detail.quantity } },
+          { session },
+        );
+      }
+      // Delete the reservation transaction
+      await StockTransaction.findByIdAndDelete(reservationId, { session });
+      return { totalQty: 0, totalCost: 0, consumedBatches: batchDetails };
+    }
+
+    // --- full release (original logic unchanged) ---
     let totalQty = 0;
     let totalCost = 0;
 

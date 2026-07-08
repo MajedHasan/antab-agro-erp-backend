@@ -63,7 +63,7 @@ export const voucherService = {
         type: payload.type,
         reference: payload.reference,
         narration: payload.narration,
-        status: "Pending", // always pending at creation
+        status: payload.status || "Pending", // always pending at creation
         createdBy: payload.createdBy
           ? new Types.ObjectId(payload.createdBy)
           : undefined,

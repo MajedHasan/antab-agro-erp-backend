@@ -1,17 +1,18 @@
+// src/models/warehouse-transfer.model.ts
 import mongoose, { Schema, Document, Types } from "mongoose";
 
 export type TransferType = "WAREHOUSE_TO_WAREHOUSE" | "FACTORY_TO_WAREHOUSE";
 export type TransferMode = "REQUEST" | "DIRECT";
 
 export type TransferStatus =
-  | "DRAFT"
+  | "REQUESTED"
   | "RECEIVER_NSM_APPROVED"
   | "SENDER_REVIEWED"
   | "SENDER_NSM_APPROVED"
-  | "DISPATCHED"
-  | "COMPLETED"
-  | "REJECTED"
-  | "CANCELLED";
+  | "SENT"
+  | "HOLD"
+  | "AWAITING_REMAINING"
+  | "COMPLETED";
 
 export type QtyHistoryStage =
   | "CREATED"
@@ -19,7 +20,9 @@ export type QtyHistoryStage =
   | "RECEIVER_NSM_APPROVED"
   | "SENDER_REVIEWED"
   | "SENDER_NSM_APPROVED"
-  | "DISPATCHED"
+  | "SENT"
+  | "HOLD"
+  | "AWAITING_REMAINING"
   | "COMPLETED";
 
 export interface ITransferQtyHistory {
@@ -34,6 +37,7 @@ export interface ITransferItem {
   productId: Types.ObjectId;
   requestedQty: number;
   finalQty: number;
+  receivedQty?: number;         // <-- NEW
   unit?: string;
   costPrice?: number;
   qtyHistory: ITransferQtyHistory[];
@@ -76,6 +80,13 @@ export interface ITransferDocuments {
     uploadedByName?: string;
     uploadedAt: Date;
   };
+  damage?: {                  // <-- NEW
+    mediaId: Types.ObjectId;
+    uploadedBy: Types.ObjectId;
+    uploadedByName?: string;
+    uploadedAt: Date;
+    reason?: string;
+  };
 }
 
 export interface IWarehouseTransfer extends Document {
@@ -109,20 +120,20 @@ export interface IWarehouseTransfer extends Document {
   receivedBy?: Types.ObjectId;
   receivedAt?: Date;
 
-  cancelledBy?: Types.ObjectId;
-  cancelledAt?: Date;
-  cancelReason?: string;
-
-  rejectedBy?: Types.ObjectId;
-  rejectedAt?: Date;
-  rejectReason?: string;
+  // cancelledBy, cancelReason, rejectedBy, rejectReason removed
 
   printSnapshot?: IPrintSnapshot;
   documents?: ITransferDocuments;
 
   approvalLogs: ITransferApprovalLog[];
+
+  voucherId: Types.ObjectId;
+
+  // 🆕 Batch reservation tracking
+  reservationIds: Types.ObjectId[];
 }
 
+// ---- sub-schemas ----
 const QtyHistorySchema = new Schema<ITransferQtyHistory>(
   {
     stage: {
@@ -133,7 +144,9 @@ const QtyHistorySchema = new Schema<ITransferQtyHistory>(
         "RECEIVER_NSM_APPROVED",
         "SENDER_REVIEWED",
         "SENDER_NSM_APPROVED",
-        "DISPATCHED",
+        "SENT",
+        "HOLD",
+        "AWAITING_REMAINING",
         "COMPLETED",
       ],
       required: true,
@@ -170,6 +183,7 @@ const TransferItemSchema = new Schema<ITransferItem>(
       required: true,
       min: 1,
     },
+    receivedQty: { type: Number, default: 0, min: 0 },  // <-- NEW
     unit: String,
     costPrice: Number,
     qtyHistory: {
@@ -196,14 +210,14 @@ const ApprovalLogSchema = new Schema<ITransferApprovalLog>(
       enum: [
         "CREATED",
         "UPDATED",
-        "DRAFT",
+        "REQUESTED",
         "RECEIVER_NSM_APPROVED",
         "SENDER_REVIEWED",
         "SENDER_NSM_APPROVED",
-        "DISPATCHED",
+        "SENT",
+        "HOLD",
+        "AWAITING_REMAINING",
         "COMPLETED",
-        "REJECTED",
-        "CANCELLED",
       ],
       required: true,
     },
@@ -281,10 +295,24 @@ const DocumentsSchema = new Schema<ITransferDocuments>(
       uploadedByName: String,
       uploadedAt: Date,
     },
+    damage: {                              // <-- NEW
+      mediaId: {
+        type: Schema.Types.ObjectId,
+        ref: "Media",
+      },
+      uploadedBy: {
+        type: Schema.Types.ObjectId,
+        ref: "User",
+      },
+      uploadedByName: String,
+      uploadedAt: Date,
+      reason: String,
+    },
   },
   { _id: false },
 );
 
+// ---- main schema ----
 const WarehouseTransferSchema = new Schema<IWarehouseTransfer>(
   {
     transferNo: {
@@ -328,16 +356,16 @@ const WarehouseTransferSchema = new Schema<IWarehouseTransfer>(
     status: {
       type: String,
       enum: [
-        "DRAFT",
+        "REQUESTED",
         "RECEIVER_NSM_APPROVED",
         "SENDER_REVIEWED",
         "SENDER_NSM_APPROVED",
-        "DISPATCHED",
+        "SENT",
+        "HOLD",
+        "AWAITING_REMAINING",
         "COMPLETED",
-        "REJECTED",
-        "CANCELLED",
       ],
-      default: "DRAFT",
+      default: "REQUESTED",
       index: true,
     },
 
@@ -382,19 +410,7 @@ const WarehouseTransferSchema = new Schema<IWarehouseTransfer>(
     },
     receivedAt: Date,
 
-    cancelledBy: {
-      type: Schema.Types.ObjectId,
-      ref: "User",
-    },
-    cancelledAt: Date,
-    cancelReason: String,
-
-    rejectedBy: {
-      type: Schema.Types.ObjectId,
-      ref: "User",
-    },
-    rejectedAt: Date,
-    rejectReason: String,
+    // cancelledBy, cancelReason, rejectedBy, rejectReason removed
 
     printSnapshot: PrintSnapshotSchema,
     documents: DocumentsSchema,
@@ -403,6 +419,18 @@ const WarehouseTransferSchema = new Schema<IWarehouseTransfer>(
       type: [ApprovalLogSchema],
       default: [],
     },
+
+    voucherId: {
+      type: Schema.Types.ObjectId,
+      ref: "Voucher",
+    },
+
+    reservationIds: [
+      {
+        type: Schema.Types.ObjectId,
+        ref: "StockTransaction",
+      },
+    ],
   },
   { timestamps: true },
 );

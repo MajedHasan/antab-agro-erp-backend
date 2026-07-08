@@ -35,4 +35,26 @@ export const stockTransactionController = {
       next(err);
     }
   },
+
+  /** Get the latest unit cost for an item at a location */
+  async getLatestUnitCost(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { itemType, itemId, locationId } = req.query;
+      if (!itemType || !itemId || !locationId) {
+        return res.status(400).json({
+          success: false,
+          message: "itemType, itemId, and locationId are required",
+        });
+      }
+      const unitCost = await stockTransactionService.getLatestUnitCost(
+        itemType as string,
+        itemId as string,
+        locationId as string,
+      );
+      return res.json({ success: true, unitCost });
+    } catch (err) {
+      next(err);
+    }
+  },
+
 };

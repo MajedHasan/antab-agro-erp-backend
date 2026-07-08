@@ -1,3 +1,4 @@
+// src/controllers/warehouse-transfer.controller.ts
 import { Request, Response, NextFunction } from "express";
 import { createCrudController } from "./crud.controller";
 import {
@@ -31,6 +32,10 @@ const baseController = createCrudController(warehouseTransferCrudService, {
       path: "documents.signed.mediaId",
       select: "url fileName module folder",
     },
+    {
+      path: "documents.damage.mediaId",
+      select: "url fileName module folder",
+    }
   ],
 });
 
@@ -53,9 +58,7 @@ export const warehouseTransferController = {
       const data = await warehouseTransferService.update(
         req.params.id,
         req.body,
-        {
-          user,
-        },
+        { user },
       );
       res.json({ success: true, data });
     } catch (err) {
@@ -87,12 +90,9 @@ export const warehouseTransferController = {
   bulkDelete: async (req: Request, res: Response, next: NextFunction) => {
     try {
       const user = getUser(req);
-
       const data = await warehouseTransferService.bulkDelete(
         req.body.filters || [],
-        {
-          user,
-        },
+        { user },
       );
       res.json({ success: true, data });
     } catch (err) {
@@ -179,6 +179,7 @@ export const warehouseTransferController = {
   receive: async (req: Request, res: Response, next: NextFunction) => {
     try {
       const user = getUser(req);
+      // req.body now includes items: [{ productId, receivedQty }] alongside mediaId and remarks
       const data = await warehouseTransferService.receive(
         req.params.id,
         req.body,
@@ -190,10 +191,40 @@ export const warehouseTransferController = {
     }
   },
 
-  cancel: async (req: Request, res: Response, next: NextFunction) => {
+  // --- NEW WORKFLOW ENDPOINTS ---
+
+  completeReceived: async (req: Request, res: Response, next: NextFunction) => {
     try {
       const user = getUser(req);
-      const data = await warehouseTransferService.cancel(
+      const data = await warehouseTransferService.completeReceived(
+        req.params.id,
+        req.body.remarks,
+        user as any,
+      );
+      res.json({ success: true, data });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  reverseRemaining: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = getUser(req);
+      const data = await warehouseTransferService.reverseRemaining(
+        req.params.id,
+        req.body.remarks,
+        user as any,
+      );
+      res.json({ success: true, data });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  damageRemaining: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = getUser(req);
+      const data = await warehouseTransferService.damageRemaining(
         req.params.id,
         req.body,
         user as any,
@@ -204,10 +235,10 @@ export const warehouseTransferController = {
     }
   },
 
-  reject: async (req: Request, res: Response, next: NextFunction) => {
+  addMoreReceived: async (req: Request, res: Response, next: NextFunction) => {
     try {
       const user = getUser(req);
-      const data = await warehouseTransferService.reject(
+      const data = await warehouseTransferService.addMoreReceived(
         req.params.id,
         req.body,
         user as any,

@@ -27,14 +27,17 @@ export const stockTransactionService = {
     itemId: string,
     locationId: string,
   ) {
+
     const tx = await StockTransaction.findOne({
       itemType,
       itemId,
       locationId,
-      transactionType: "purchase",
+      transactionType: { $in: ["purchase", "production_return", "transfer_in", "production", "return"] },
+      $expr: { $gt: [{ $subtract: ["$remainingQuantity", "$reserved"] }, 0] },
     })
       .sort({ transactionDate: -1 })
       .lean();
+    
     return tx?.unitCost ?? 0;
   },
 
@@ -52,7 +55,7 @@ export const stockTransactionService = {
       itemType,
       itemId,
       locationId,
-      transactionType: "purchase",
+      transactionType: {$in: ["purchase", "production_return", "transfer_in", "production", "return"]},
       $expr: {
         $gt: [{ $subtract: ["$remainingQuantity", "$reserved"] }, 0],
       },
