@@ -37,6 +37,11 @@ router.post("/:id/deliver", salesOrderController.deliver);
 
 router.post("/:id/cancel", salesOrderController.cancel);
 
+/* ---------- DELIVERY CHALAN (DC) ---------- */
+
+// Upload DC (optional) – no complex verification, just stores media reference
+router.post("/:id/upload-dc", salesOrderController.uploadDc);
+
 /* =====================================================
    STANDARD CRUD ROUTES
 ===================================================== */

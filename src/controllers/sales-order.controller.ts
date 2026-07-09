@@ -244,4 +244,43 @@ export const salesOrderController = {
       next(err);
     }
   },
+
+  /* ================================
+     UPLOAD DELIVERY CHALAN (DC)
+     → optional – no verification
+  ================================= */
+  uploadDc: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = (req as any).user;
+
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          message: "Unauthorized",
+        });
+      }
+
+      const { dcMediaId } = req.body;
+
+      if (!dcMediaId) {
+        return res.status(400).json({
+          success: false,
+          message: "dcMediaId is required",
+        });
+      }
+
+      const data = await salesOrderService.uploadDc(
+        req.params.id,
+        dcMediaId,
+        user.userId,
+      );
+
+      res.json({
+        success: true,
+        data,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
 };

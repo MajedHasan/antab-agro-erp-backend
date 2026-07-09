@@ -1,9 +1,9 @@
+// src/models/sales-order.model.ts
 import mongoose, { Schema, Document, Types, HydratedDocument } from "mongoose";
 
 /* ===============================
    Order Item Interface
 ================================ */
-
 export interface ISalesOrderItem {
   productId: Types.ObjectId;
   warehouseId: Types.ObjectId;
@@ -28,23 +28,17 @@ export interface ISalesOrderItem {
 /* ===============================
    Approval History Interface
 ================================ */
-
 export interface IApprovalLog {
   role: "A.M" | "R.M" | "N.S.M" | "FULFILLMENT" | "DELIVERY";
-
   userId: Types.ObjectId;
-
   status: "APPROVED" | "REJECTED" | "PENDING";
-
   remarks?: string;
-
   actionDate?: Date;
 }
 
 /* ===============================
    Main Sales Order Interface
 ================================ */
-
 export interface ISalesOrder extends Document {
   orderNo: string;
 
@@ -61,10 +55,6 @@ export interface ISalesOrder extends Document {
   grandTotal: number;
 
   totalBonusQty: number;
-
-  /* ======================
-     Workflow Status
-  ======================= */
 
   status:
     | "PENDING_AM"
@@ -89,19 +79,23 @@ export interface ISalesOrder extends Document {
   /* ======================
      Delivery Info
   ======================= */
-
   deliveryManId?: Types.ObjectId;
   deliveryDate?: Date;
 
   /* ======================
      Invoice
   ======================= */
-
   invoiceId?: Types.ObjectId;
   isInvoiced: boolean;
 
-  notes?: string;
+  /* ======================
+     Delivery Chalan (DC)
+  ======================= */
+  dcMediaId?: Types.ObjectId;        // 🆕 reference to the uploaded DC file
+  dcUploadedBy?: Types.ObjectId;     // 🆕 who uploaded the DC
+  dcUploadedAt?: Date;               // 🆕 when the DC was uploaded
 
+  notes?: string;
   isActive: boolean;
 
   createdBy: Types.ObjectId;
@@ -116,7 +110,6 @@ type SalesOrderDoc = HydratedDocument<ISalesOrder>;
 /* ===============================
    Schemas
 ================================ */
-
 const SalesOrderItemSchema = new Schema<ISalesOrderItem>(
   {
     productId: {
@@ -129,21 +122,15 @@ const SalesOrderItemSchema = new Schema<ISalesOrderItem>(
       ref: "WarehouseOrFactory",
       required: true,
     },
-
     qty: { type: Number, required: true },
     bonusQty: { type: Number, default: 0 },
-
     unitPrice: { type: Number, required: true },
-
     discountPercent: { type: Number, default: 0 },
     discountAmount: { type: Number, default: 0 },
-
     taxPercent: { type: Number, default: 0 },
     taxAmount: { type: Number, default: 0 },
-
     lineSubtotal: { type: Number, required: true },
     lineTotal: { type: Number, required: true },
-
     promotionId: {
       type: Schema.Types.ObjectId,
       ref: "Promotion",
@@ -159,21 +146,17 @@ const ApprovalLogSchema = new Schema<IApprovalLog>(
       enum: ["A.M", "R.M", "N.S.M", "FULFILLMENT", "DELIVERY"],
       required: true,
     },
-
     userId: {
       type: Schema.Types.ObjectId,
       ref: "User",
       required: true,
     },
-
     status: {
       type: String,
       enum: ["APPROVED", "REJECTED", "PENDING"],
       default: "PENDING",
     },
-
     remarks: { type: String },
-
     actionDate: { type: Date },
   },
   { _id: false },
@@ -277,6 +260,19 @@ const SalesOrderSchema = new Schema<ISalesOrder>(
 
     isInvoiced: { type: Boolean, default: false },
 
+    // 🆕 Delivery Chalan fields
+    dcMediaId: {
+      type: Schema.Types.ObjectId,
+      ref: "Media",
+    },
+    dcUploadedBy: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+    },
+    dcUploadedAt: {
+      type: Date,
+    },
+
     notes: { type: String },
 
     isActive: { type: Boolean, default: true },
@@ -298,7 +294,6 @@ const SalesOrderSchema = new Schema<ISalesOrder>(
 /* ===============================
    Indexes
 ================================ */
-
 SalesOrderSchema.index({ orderNo: 1 });
 SalesOrderSchema.index({ customerId: 1 });
 SalesOrderSchema.index({ status: 1 });
@@ -308,10 +303,8 @@ SalesOrderSchema.index({ paymentMethod: 1 });
 SalesOrderSchema.pre("validate", function (next) {
   if (this.paymentMethod === "CREDIT" && this.creditSnapshot) {
     const { creditLimit = 0, used = 0 } = this.creditSnapshot;
-
     this.creditSnapshot.available = creditLimit - used;
   }
-
   next();
 });
 

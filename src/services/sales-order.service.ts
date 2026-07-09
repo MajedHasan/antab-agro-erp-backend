@@ -1,8 +1,9 @@
+// src/services/sales-order.service.ts
 import { createCrudService } from "./crud.service";
 import SalesOrder from "../models/sales-order.model";
 import SalesInvoice from "../models/sales-invoice.model";
 import ProductStock from "../models/productStock.model";
-import { Types } from "mongoose";
+import { Types, ClientSession } from "mongoose";
 import QRCode from "qrcode";
 import sharp from "sharp";
 import jsQR from "jsqr";
@@ -16,6 +17,13 @@ import {
   Path2D,
   DOMMatrix,
 } from "@napi-rs/canvas";
+// ---------- NEW IMPORTS ----------
+import { stockTransactionService } from "../modules/stockTransaction/stockTransaction.service";
+import { inventoryCostService } from "../modules/stockTransaction/inventoryCost.service";
+import { voucherService } from "./voucher.service";
+import { accountService } from "./account.service";
+import Product from "../models/product.model";
+import WarehouseOrFactory from "../models/warehouseOrFactory.model";
 
 (globalThis as any).Image = Image;
 (globalThis as any).ImageData = ImageData;
@@ -33,7 +41,7 @@ type OrderStatus =
   | "REJECTED"
   | "CANCELLED";
 
-const SIGNATURE_SIMILARITY_THRESHOLD = 0.8;
+const SIGNATURE_SIMILARITY_THRESHOLD = 0.2;
 
 const defaultPopulate = [
   {
@@ -58,6 +66,9 @@ const base = createCrudService(SalesOrder, {
   defaultPopulate,
 });
 
+/* =======================
+   Helper Functions (existing + new)
+========================= */
 function firstLetter(s?: string) {
   if (!s || typeof s !== "string") return "X";
   const t = s.trim();
@@ -135,6 +146,7 @@ function ensureEditableOrderStatus(status: OrderStatus) {
   }
 }
 
+// --- PDF / Canvas helpers (unchanged) ---
 function createPdfCanvasFactory() {
   return {
     create(width: number, height: number) {
@@ -166,17 +178,10 @@ async function getDealerById(customerId: any, session?: any) {
 
 async function getDealerCreditInfo(customerId: any, session?: any) {
   const dealer = await getDealerById(customerId, session);
-
   const creditLimit = dealer.creditLimit || 0;
   const used = dealer.currentDue || 0;
   const available = creditLimit - used;
-
-  return {
-    dealer,
-    creditLimit,
-    used,
-    available,
-  };
+  return { dealer, creditLimit, used, available };
 }
 
 async function generateOrderNo(payload: any, session: any) {
@@ -244,18 +249,17 @@ async function generateOrderNo(payload: any, session: any) {
   return `SO-${prefix}-${dateStamp}-${String(next).padStart(5, "0")}`;
 }
 
+// --- Stock reservation helpers (unchanged) ---
 async function reserveOnStockInstance(
   stockDoc: any,
   qtyToReserve: number,
   session: any,
 ) {
   if (qtyToReserve === 0) return;
-
   const available = computeAvailable(stockDoc);
   if (available < qtyToReserve) {
     throw new Error("Not enough available stock to reserve");
   }
-
   stockDoc.reservedForSales = (stockDoc.reservedForSales || 0) + qtyToReserve;
   stockDoc.lastUpdated = new Date();
   await stockDoc.save({ session });
@@ -267,14 +271,12 @@ async function changeReservationByDelta(
   session: any,
 ) {
   if (delta === 0) return;
-
   if (delta > 0) {
     const available = computeAvailable(stockDoc);
     if (available < delta) {
       throw new Error("Not enough stock available to increase reservation");
     }
   }
-
   stockDoc.reservedForSales = Math.max(
     0,
     (stockDoc.reservedForSales || 0) + delta,
@@ -289,7 +291,6 @@ async function releaseReservationOnStockInstance(
   session: any,
 ) {
   if (qtyToRelease === 0) return;
-
   stockDoc.reservedForSales = Math.max(
     0,
     (stockDoc.reservedForSales || 0) - qtyToRelease,
@@ -301,18 +302,17 @@ async function releaseReservationOnStockInstance(
 async function releaseAllReservations(order: any, session: any) {
   for (const item of order.items || []) {
     const totalQty = itemTotalQty(item);
-
     const stock = await ProductStock.findOne({
       productId: item.productId,
       warehouseId: item.warehouseId,
     }).session(session);
-
     if (stock) {
       await releaseReservationOnStockInstance(stock, totalQty, session);
     }
   }
 }
 
+// --- Image / PDF processing helpers (unchanged) ---
 async function normalizeToImageBuffer(
   buffer: Buffer,
   mimeType?: string,
@@ -320,38 +320,29 @@ async function normalizeToImageBuffer(
   if (mimeType?.startsWith("image/")) {
     return buffer;
   }
-
   if (mimeType === "application/pdf") {
     const loadingTask = pdfjsLib.getDocument({
       data: new Uint8Array(buffer),
       disableFontFace: true,
     });
-
     const pdf = await loadingTask.promise;
     const page = await pdf.getPage(1);
-
     const viewport = page.getViewport({ scale: 2.5 });
-
     const canvasFactory = createPdfCanvasFactory();
     const { canvas, context } = canvasFactory.create(
       viewport.width,
       viewport.height,
     );
-
     await page.render({
       canvasContext: context,
       viewport,
       canvasFactory,
     } as any).promise;
-
     const imageBuffer = canvas.toBuffer("image/png");
-
     await page.cleanup?.();
     await pdf.cleanup?.();
-
     return imageBuffer;
   }
-
   throw new Error("Unsupported file type. Only image or PDF allowed");
 }
 
@@ -364,7 +355,7 @@ async function normalizeSignatureBuffer(input: Buffer): Promise<Buffer> {
       fit: "contain",
       background: "#ffffff",
     })
-    .greyscale() // New added
+    .greyscale()
     .normalize()
     .sharpen()
     .png()
@@ -378,23 +369,18 @@ async function readMediaBuffer(
   const Media = SalesOrder.db.model("Media");
   let query = Media.findById(mediaId);
   if (session) query = query.session(session);
-
   const media = await query;
   if (!media) throw new Error("Media file not found");
 
   let filePath: string | undefined =
     media.filePath || media.path || media.localPath || media.storagePath;
 
-  // ✅ FIX: fallback from url
   if (!filePath && media.url) {
     filePath = path.join(process.cwd(), media.url);
-    // or use your actual uploads base dir
   }
-
   if (!filePath) {
     throw new Error("Media file path is missing");
   }
-
   return fs.readFile(filePath);
 }
 
@@ -405,23 +391,18 @@ async function getMediaFilePath(
   const Media = SalesOrder.db.model("Media");
   let query = Media.findById(mediaId);
   if (session) query = query.session(session);
-
   const media = await query;
   if (!media) throw new Error("Media file not found");
 
   let filePath: string | undefined =
     media.filePath || media.path || media.localPath || media.storagePath;
 
-  // ✅ FIX (same as readMediaBuffer)
   if (!filePath && media.url) {
     filePath = path.join(process.cwd(), media.url);
-    // console.log("Resolved dealer signature path:", filePath);
   }
-
   if (!filePath) {
     throw new Error("Media file path is missing");
   }
-
   return filePath;
 }
 
@@ -434,12 +415,27 @@ async function generateQrImage(qrPayload: string): Promise<string> {
   });
 }
 
-async function buildQrPayload(invoice: any, order: any) {
+// 🆕 Enriched QR payload with dealer info & product list
+async function buildQrPayload(
+  invoice: any,
+  order: any,
+  dealer: any,
+  productDetails: { name: string; qty: number; unitPrice: number }[],
+) {
   return JSON.stringify({
     invoiceId: String(invoice._id),
     orderId: String(order._id),
     invoiceNo: String(invoice.invoiceNo),
     grandTotal: Number(invoice.grandTotal || 0),
+    dealer: {
+      code: dealer.code || "",
+      name: dealer.name || "",
+      phone: dealer.phoneNumber || "",
+      creditLimit: Number(dealer.creditLimit || 0),
+      currentDue: Number(dealer.currentDue || 0),
+      available: Number((dealer.creditLimit || 0) - (dealer.currentDue || 0)),
+    },
+    products: productDetails,
   });
 }
 
@@ -448,14 +444,25 @@ async function buildPrintableInvoiceData(
   invoice: any,
   dealer: any,
 ) {
-  const qrCodeData = invoice?.qrCode || "";
-  const qrCodeImage = await generateQrImage(qrCodeData);
+  const productDetails = await Promise.all(
+    order.items.map(async (item: any) => {
+      const prod = await Product.findById(item.productId).select("name").lean();
+      return {
+        name: prod?.name || "Unknown",
+        qty: item.qty + (item.bonusQty || 0),
+        unitPrice: item.unitPrice,
+      };
+    }),
+  );
+
+  const qrPayload = await buildQrPayload(invoice, order, dealer, productDetails);
+  const qrCodeImage = await generateQrImage(qrPayload);
 
   return {
     order,
     invoice,
     dealer,
-    qrCodeData,
+    qrCodeData: qrPayload,
     qrCodeImage,
     dealerSignatureField: {
       label: "Dealer Signature",
@@ -466,6 +473,7 @@ async function buildPrintableInvoiceData(
   };
 }
 
+// --- Signature matching helpers (unchanged) ---
 async function extractQrPayloadFromBuffer(fileBuffer: Buffer): Promise<string> {
   const { data, info } = await sharp(fileBuffer)
     .rotate()
@@ -475,21 +483,16 @@ async function extractQrPayloadFromBuffer(fileBuffer: Buffer): Promise<string> {
     .toBuffer({ resolveWithObject: true });
 
   const expected = info.width * info.height * 4;
-
   if (data.length !== expected) {
     throw new Error(
       `Invalid QR image buffer: expected ${expected} bytes, got ${data.length}`,
     );
   }
-
   const rgba = Uint8ClampedArray.from(data);
-
   const result = jsQR(rgba, info.width, info.height);
-
   if (!result?.data) {
     throw new Error("QR code not found in uploaded document");
   }
-
   return result.data;
 }
 
@@ -497,16 +500,13 @@ async function extractSignatureCropBuffer(fileBuffer: Buffer): Promise<Buffer> {
   const meta = await sharp(fileBuffer).metadata();
   const width = meta.width || 0;
   const height = meta.height || 0;
-
   if (!width || !height) {
     throw new Error("Unable to read uploaded document dimensions");
   }
-
   const left = Math.max(0, Math.floor(width * 0.5));
   const top = Math.max(0, Math.floor(height * 0.62));
   const cropWidth = Math.max(1, Math.floor(width * 0.45));
   const cropHeight = Math.max(1, Math.floor(height * 0.3));
-
   return sharp(fileBuffer)
     .rotate()
     .extract({
@@ -520,7 +520,7 @@ async function extractSignatureCropBuffer(fileBuffer: Buffer): Promise<Buffer> {
       fit: "contain",
       background: "#ffffff",
     })
-    .greyscale() // New added
+    .greyscale()
     .normalize()
     .sharpen()
     .png()
@@ -531,33 +531,24 @@ async function compareImageSimilarity(
   bufferA: Buffer,
   bufferB: Buffer,
 ): Promise<number> {
-  // const width = 520;
-  // const height = 220;
   const width = 300;
   const height = 120;
-
   const a = await sharp(bufferA)
-    // .resize(width, height, { fit: "fill" })
     .resize(width, height, { fit: "contain", background: "#ffffff" })
     .greyscale()
     .raw()
     .toBuffer();
-
   const b = await sharp(bufferB)
-    // .resize(width, height, { fit: "fill" })
     .resize(width, height, { fit: "contain", background: "#ffffff" })
     .greyscale()
     .raw()
     .toBuffer();
-
   const len = Math.min(a.length, b.length);
   if (!len) return 0;
-
   let diff = 0;
   for (let i = 0; i < len; i++) {
     diff += Math.abs(a[i] - b[i]) / 255;
   }
-
   const avgDiff = diff / len;
   return Math.max(0, 1 - avgDiff);
 }
@@ -566,6 +557,79 @@ function isInvoiceCompletedStatus(status: string) {
   return ["DELIVERED", "CANCELLED"].includes(status);
 }
 
+// 🆕 Accounting helpers
+async function getProductLocationAccount(
+  productId: string,
+  locationId: string,
+  session?: ClientSession,
+) {
+  const prod = await Product.findById(productId)
+    .session(session ?? null)
+    .lean();
+  if (!prod) throw new Error("Product not found");
+  const loc = await WarehouseOrFactory.findById(locationId)
+    .session(session ?? null)
+    .lean();
+  if (!loc) throw new Error("Location not found");
+  return (accountService as any).getAccountByPath(
+    ["Assets", "Current Assets", "Inventory", "Finished Goods", prod.name],
+    "Asset",
+    { session },
+  );
+}
+
+async function getCOGSAccount(
+  productName: string,
+  session?: ClientSession,
+) {
+  return (accountService as any).getAccountByPath(
+    ["Expense", "Cost of Goods Sold", "Sold Goods", productName],
+    "Expense",
+    { session },
+  );
+}
+
+async function getSalesRevenueAccount(
+  dealerName: string,
+  dealerPhone: string,
+  session?: ClientSession,
+) {
+  const name = `${dealerName} ${dealerPhone}`;
+  return (accountService as any).getAccountByPath(
+    ["Revenue", "Sales", name],
+    "Revenue",
+    { session },
+  );
+}
+
+async function getDealerARAccount(
+  dealerName: string,
+  dealerPhone: string,
+  session?: ClientSession,
+) {
+  const name = `${dealerName} ${dealerPhone}`;
+  return (accountService as any).getAccountByPath(
+    ["Assets", "Current Assets", "Accounts Receivable", name],
+    "Asset",
+    { session },
+  );
+}
+
+async function getCashAccount(session?: ClientSession) {
+  return (accountService as any).getAccountByPath(
+    ["Assets", "Current Assets", "Cash & Cash Equivalents", "Cash In Hand"],
+    "Asset",
+    { session },
+  );
+}
+
+function now() {
+  return new Date();
+}
+
+// =======================
+// Main Sales Order Service
+// =======================
 export const salesOrderService = {
   ...base,
 
@@ -597,11 +661,27 @@ export const salesOrderService = {
 
     const [invoice, dealer] = await Promise.all([
       Invoice.findById(invoiceId),
-      Dealer.findById(customerId).select("name proprietor attachments"),
+      Dealer.findById(customerId).select("name phoneNumber attachments"),
     ]);
 
     if (!invoice) throw new Error("Invoice not found");
     if (!dealer) throw new Error("Dealer not found");
+
+    const productDetails = await Promise.all(
+      order.items.map(async (item: any) => {
+        const prod = await Product.findById(item.productId)
+          .select("name")
+          .lean();
+        return {
+          name: prod?.name || "Unknown",
+          qty: item.qty + (item.bonusQty || 0),
+          unitPrice: item.unitPrice,
+        };
+      }),
+    );
+    const qrPayload = await buildQrPayload(invoice, order, dealer, productDetails);
+    invoice.qrCode = qrPayload;
+    await invoice.save();
 
     return buildPrintableInvoiceData(order, invoice, dealer);
   },
@@ -635,27 +715,19 @@ export const salesOrderService = {
         if (dealer.type !== "CREDIT") {
           throw new Error("This dealer is not allowed for credit orders");
         }
-
         if ((dealer.creditLimit || 0) <= 0) {
           throw new Error("Dealer credit limit is not configured");
         }
-
         const used = dealer.currentDue || 0;
         const available = (dealer.creditLimit || 0) - used;
-
         if (available < payload.grandTotal) {
           throw new Error("Credit limit exceeded");
         }
-
-        console.log("Used: ", used, "Available: ", available);
-
         payload.creditSnapshot = {
           creditLimit: dealer.creditLimit || 0,
           used,
           available,
         };
-
-        // ✅ MOVE THIS FROM SHIP → CREATE
         dealer.currentDue = used + payload.grandTotal;
         await dealer.save({ session });
       } else {
@@ -666,16 +738,13 @@ export const salesOrderService = {
 
       for (const item of order.items) {
         const totalQty = itemTotalQty(item);
-
         const stock = await ProductStock.findOne({
           productId: item.productId,
           warehouseId: item.warehouseId,
         }).session(session);
-
         if (!stock) {
           throw new Error("Stock not found for product/warehouse");
         }
-
         await reserveOnStockInstance(stock, totalQty, session);
       }
 
@@ -698,14 +767,12 @@ export const salesOrderService = {
       ) {
         throw new Error("customerId cannot be changed after order creation");
       }
-
       if (
         cleanPayload.warehouseId &&
         !isSameObjectId(cleanPayload.warehouseId, oldOrder.warehouseId)
       ) {
         throw new Error("warehouseId cannot be changed after order creation");
       }
-
       if (
         cleanPayload.paymentMethod &&
         cleanPayload.paymentMethod !== oldOrder.paymentMethod
@@ -745,7 +812,6 @@ export const salesOrderService = {
           }).session(session);
 
           if (!stock) throw new Error("Stock not found while updating order");
-
           const available = computeAvailable(stock);
           if (available < delta) {
             throw new Error(
@@ -770,20 +836,31 @@ export const salesOrderService = {
         if (!stock) {
           throw new Error("Stock not found while applying reservation delta");
         }
-
         await changeReservationByDelta(stock, delta, session);
+      }
+
+      if (
+        oldOrder.paymentMethod === "CREDIT" &&
+        cleanPayload.grandTotal !== undefined &&
+        cleanPayload.grandTotal !== oldOrder.grandTotal
+      ) {
+        const dealer = await getDealerById(nextCustomerId, session);
+        const diff = cleanPayload.grandTotal - oldOrder.grandTotal;
+        dealer.currentDue = Math.max(
+          0,
+          (dealer.currentDue || 0) + diff,
+        );
+        await dealer.save({ session });
       }
 
       if ((oldOrder.paymentMethod as string) === "CREDIT") {
         const dealerInfo = await getDealerCreditInfo(nextCustomerId, session);
-
         if (
           dealerInfo.available <
           (cleanPayload.grandTotal ?? oldOrder.grandTotal)
         ) {
           throw new Error("Credit limit exceeded after update");
         }
-
         cleanPayload.creditSnapshot = {
           creditLimit: dealerInfo.creditLimit,
           used: dealerInfo.used,
@@ -792,7 +869,6 @@ export const salesOrderService = {
       }
 
       cleanPayload.updatedBy = payload.updatedBy || oldOrder.updatedBy;
-
       const updatedOrder = await base.update(id, cleanPayload, { session });
       return updatedOrder;
     });
@@ -866,23 +942,19 @@ export const salesOrderService = {
 
       await releaseAllReservations(order, session);
 
-      order.status = "REJECTED";
-
-      // ✅ ADD THIS BLOCK
       if (
         order.paymentMethod === "CREDIT" &&
-        order.status !== "REJECTED" // for reject
+        order.status !== "REJECTED"
       ) {
         const dealer = await getDealerById(order.customerId, session);
-
         dealer.currentDue = Math.max(
           0,
           (dealer.currentDue || 0) - order.grandTotal,
         );
-
         await dealer.save({ session });
       }
 
+      order.status = "REJECTED";
       order.approvalLogs.push({
         role,
         userId: new Types.ObjectId(userId),
@@ -909,7 +981,7 @@ export const salesOrderService = {
         throw new Error("Invoice already created for this order");
       }
 
-      const invoiceNo = `INV-${normalizeDhakaDateStamp()}-${Date.now()}`;
+      const invoiceNo = order.orderNo.replace(/^SO/, "INV");
 
       const [invoice] = await SalesInvoice.create(
         [
@@ -935,16 +1007,23 @@ export const salesOrderService = {
         { session },
       );
 
-      const qrPayload = await buildQrPayload(invoice, order);
-      invoice.qrCode = qrPayload;
-      await invoice.save({ session });
-
       const dealer = await getDealerById(order.customerId, session);
 
-      // if ((order.paymentMethod as string) === "CREDIT") {
-      //   dealer.currentDue = (dealer.currentDue || 0) + order.grandTotal;
-      //   await dealer.save({ session });
-      // }
+      const productDetails = await Promise.all(
+        order.items.map(async (item: any) => {
+          const prod = await Product.findById(item.productId)
+            .select("name")
+            .lean();
+          return {
+            name: prod?.name || "Unknown",
+            qty: item.qty + (item.bonusQty || 0),
+            unitPrice: item.unitPrice,
+          };
+        }),
+      );
+      const qrPayload = await buildQrPayload(invoice, order, dealer, productDetails);
+      invoice.qrCode = qrPayload;
+      await invoice.save({ session });
 
       order.status = "IN_SHIPPING";
       order.invoiceId = invoice._id;
@@ -1013,13 +1092,7 @@ export const salesOrderService = {
         throw new Error("Dealer signature template is missing");
       }
 
-      // const uploadedBuffer = await readMediaBuffer(
-      //   uploadedDocumentFileId,
-      //   session,
-      // );
-
       const Media = SalesOrder.db.model("Media");
-
       const mediaDoc = await Media.findById(uploadedDocumentFileId).session(
         session,
       );
@@ -1029,8 +1102,6 @@ export const salesOrderService = {
         uploadedDocumentFileId,
         session,
       );
-
-      // ✅ NEW: normalize buffer (PDF → Image)
       uploadedBuffer = await normalizeToImageBuffer(
         uploadedBuffer,
         mediaDoc.mimeType,
@@ -1040,8 +1111,6 @@ export const salesOrderService = {
         dealerSignatureId.toString(),
         session,
       );
-      // const dealerSignatureBuffer = await fs.readFile(dealerSignaturePath);
-
       const dealerMedia =
         await Media.findById(dealerSignatureId).session(session);
       if (!dealerMedia) {
@@ -1092,34 +1161,110 @@ export const salesOrderService = {
         throw new Error("Dealer signature mismatch");
       }
 
+      // =========================================
+      // 1. Physical stock deduction + Stock Transactions + Voucher
+      // =========================================
+      const voucherLines: any[] = [];
+      const revenueAccount = await getSalesRevenueAccount(dealer.name, dealer.phoneNumber, session);
+      const debitAccount = order.paymentMethod === "CREDIT"
+        ? await getDealerARAccount(dealer.name, dealer.phoneNumber, session)
+        : await getCashAccount(session);
+
       for (const item of order.items) {
-        const totalQty = itemTotalQty(item);
+        const totalQty = itemTotalQty(item); // physical qty leaving inventory
+        const prodId = String(item.productId);
+        const warehouseId = String(item.warehouseId);
+        const product = await Product.findById(prodId).session(session).lean();
+        if (!product) throw new Error(`Product ${prodId} not found`);
 
         const stock = await ProductStock.findOne({
-          productId: item.productId,
-          warehouseId: item.warehouseId,
+          productId: prodId,
+          warehouseId,
         }).session(session);
-
-        if (!stock) throw new Error("Stock not found for delivery");
+        if (!stock) throw new Error(`Stock not found for ${product.name}`);
 
         if ((stock.reservedForSales || 0) < totalQty) {
           throw new Error("Reserved stock is less than order quantity");
         }
-
         if ((stock.quantity || 0) < totalQty) {
-          throw new Error("Insufficient physical stock for delivery");
+          throw new Error("Insufficient physical stock");
         }
 
-        stock.quantity = (stock.quantity || 0) - totalQty;
+        stock.quantity -= totalQty;
         stock.reservedForSales = Math.max(
           0,
           (stock.reservedForSales || 0) - totalQty,
         );
         stock.lastUpdated = new Date();
-
         await stock.save({ session });
+
+        const { totalCost } = await inventoryCostService.consume(
+          "Product",
+          prodId,
+          warehouseId,
+          totalQty,
+          "FIFO",
+          session,
+        );
+        const unitCost = totalCost / totalQty;
+
+        await stockTransactionService.create({
+          itemType: "Product",
+          itemId: prodId,
+          locationId: warehouseId,
+          transactionType: "sale",
+          quantity: -totalQty,
+          unitCost,
+          totalCost,
+          transactionDate: now(),
+          createdBy: deliveryUserId,
+          remainingQuantity: 0,
+        }, session);
+
+        const inventoryAccount = await getProductLocationAccount(prodId, warehouseId, session);
+        const cogsAccount = await getCOGSAccount(product.name, session);
+
+        voucherLines.push({
+          accountId: cogsAccount._id,
+          debit: totalCost,
+          credit: 0,
+          narration: `COGS for ${product.name} - Qty ${totalQty}`,
+        });
+        voucherLines.push({
+          accountId: inventoryAccount._id,
+          debit: 0,
+          credit: totalCost,
+          narration: `Inventory reduction for sale of ${product.name}`,
+        });
       }
 
+      const totalSelling = order.grandTotal;
+      voucherLines.push({
+        accountId: debitAccount._id,
+        debit: totalSelling,
+        credit: 0,
+        narration: `Sale to ${dealer.name} - Order ${order.orderNo}`,
+      });
+      voucherLines.push({
+        accountId: revenueAccount._id,
+        debit: 0,
+        credit: totalSelling,
+        narration: `Revenue for Order ${order.orderNo}`,
+      });
+
+      await voucherService.create({
+        voucherNo: `SALE-${invoice.invoiceNo}-${Date.now()}`,
+        date: now(),
+        type: "Journal",
+        narration: `Sales invoice ${invoice.invoiceNo} for dealer ${dealer.name}`,
+        lines: voucherLines,
+        status: "Approved",
+        createdBy: deliveryUserId,
+      });
+
+      // =========================================
+      // 2. Finalise invoice & order
+      // =========================================
       invoice.signedInvoice = new Types.ObjectId(uploadedDocumentFileId);
       invoice.isVerified = true;
       invoice.updatedBy = new Types.ObjectId(deliveryUserId);
@@ -1171,24 +1316,45 @@ export const salesOrderService = {
 
       await releaseAllReservations(order, session);
 
-      // ✅ ADD THIS BLOCK
       if (
         order.paymentMethod === "CREDIT" &&
-        order.status !== "CANCELLED" // for cancel
+        order.status !== "CANCELLED"
       ) {
         const dealer = await getDealerById(order.customerId, session);
-
         dealer.currentDue = Math.max(
           0,
           (dealer.currentDue || 0) - order.grandTotal,
         );
-
         await dealer.save({ session });
       }
 
       order.status = "CANCELLED";
       await order.save({ session });
 
+      return order;
+    });
+  },
+
+  // 🆕 Upload Delivery Chalan (DC) – optional
+  async uploadDc(orderId: string, dcMediaId: string, userId: string) {
+    return base.withTransaction(async (session) => {
+      const order = await SalesOrder.findById(orderId).session(session);
+      if (!order) throw new Error("Order not found");
+
+      // Allow DC upload when order is at least shipped (IN_SHIPPING or DELIVERED)
+      if (!["IN_SHIPPING", "DELIVERED"].includes(order.status)) {
+        throw new Error("DC can only be uploaded after the order has been shipped");
+      }
+
+      const Media = SalesOrder.db.model("Media");
+      const media = await Media.findById(dcMediaId).session(session);
+      if (!media) throw new Error("Media file not found");
+
+      order.dcMediaId = new Types.ObjectId(dcMediaId);
+      order.dcUploadedBy = new Types.ObjectId(userId);
+      order.dcUploadedAt = new Date();
+
+      await order.save({ session });
       return order;
     });
   },
