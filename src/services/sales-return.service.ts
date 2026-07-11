@@ -6,6 +6,12 @@ import SalesOrder from "../models/sales-order.model";
 import ProductStock from "../models/productStock.model";
 import { Types } from "mongoose";
 import QRCode from "qrcode";
+// ---------- NEW IMPORTS ----------
+import { voucherService } from "./voucher.service";
+import { accountService } from "./account.service";
+import Product from "../models/product.model";
+import { stockTransactionService } from "../modules/stockTransaction/stockTransaction.service";
+import { inventoryCostService } from "../modules/stockTransaction/inventoryCost.service";
 
 type ReturnRole = "M.O" | "A.M" | "R.M" | "N.S.M" | "WAREHOUSE";
 type ReturnStatus =
@@ -44,6 +50,7 @@ const base = createCrudService(SalesReturn, {
   defaultPopulate,
 });
 
+// ---------- Helper functions ----------
 function round2(n: number) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
@@ -91,20 +98,16 @@ function getEffectiveQtyByStatus(item: any, status: ReturnStatus) {
   switch (status) {
     case "PENDING_AM":
       return getRequestedQty(item);
-
     case "PENDING_RM":
       return Number(item.amQty || item.requestedQty || 0);
-
     case "PENDING_NSM":
       return Number(item.rmQty || item.amQty || item.requestedQty || 0);
-
     case "READY_FOR_PRINT":
     case "PRINTED":
     case "SENT_TO_WAREHOUSE":
       return Number(
         item.nsmQty || item.rmQty || item.amQty || item.requestedQty || 0,
       );
-
     case "HOLD":
     case "RESOLVED":
     case "WAREHOUSE_RECEIVED":
@@ -118,11 +121,9 @@ function getEffectiveQtyByStatus(item: any, status: ReturnStatus) {
           item.requestedQty ||
           0,
       );
-
     case "REJECTED":
     case "CANCELLED":
       return 0;
-
     default:
       return 0;
   }
@@ -136,7 +137,6 @@ function getCurrentStageQtyForRole(
   if (typeof payloadQty === "number" && !Number.isNaN(payloadQty)) {
     return Math.max(0, payloadQty);
   }
-
   if (role === "A.M") return Number(item.requestedQty || 0);
   if (role === "R.M") return Number(item.amQty || item.requestedQty || 0);
   return Number(item.rmQty || item.amQty || item.requestedQty || 0);
@@ -199,7 +199,6 @@ function buildReturnQrPayload(returnDoc: any) {
   const invoiceIds = (returnDoc.invoiceReturns || []).map((b: any) =>
     String(b.invoiceId),
   );
-
   return JSON.stringify({
     returnId: String(returnDoc._id),
     returnNo: String(returnDoc.returnNo),
@@ -223,17 +222,42 @@ async function generateReturnQrImage(returnDoc: any): Promise<string> {
 
 async function generateReturnNo(payload: any, session: any) {
   const Dealer = SalesReturn.db.model("Dealer");
-
   const dealer = await Dealer.findById(payload.customerId)
-    .select("territory area region zone")
+    .select("territory area region zone code")
     .session(session)
     .lean();
 
-  const prefix =
-    firstLetter(dealer?.territory?.name) +
-    firstLetter(dealer?.area?.name) +
-    firstLetter(dealer?.region?.name) +
-    firstLetter(dealer?.zone?.name);
+  if (!dealer) throw new Error("Dealer not found");
+
+  const Territory = SalesReturn.db.model("Territory");
+  const Area = SalesReturn.db.model("Area");
+  const Region = SalesReturn.db.model("Region");
+  const Zone = SalesReturn.db.model("Zone");
+
+  const [territory, area, region, zone] = await Promise.all([
+    dealer.territory
+      ? Territory.findById(dealer.territory).select("name").session(session).lean()
+      : null,
+    dealer.area
+      ? Area.findById(dealer.area).select("name").session(session).lean()
+      : null,
+    dealer.region
+      ? Region.findById(dealer.region).select("name").session(session).lean()
+      : null,
+    dealer.zone
+      ? Zone.findById(dealer.zone).select("name").session(session).lean()
+      : null,
+  ]);
+
+  let prefix =
+    firstLetter(territory?.name) +
+    firstLetter(area?.name) +
+    firstLetter(region?.name) +
+    firstLetter(zone?.name);
+
+  if (prefix === "XXXX" && dealer.code) {
+    prefix = dealer.code.slice(0, 4).toUpperCase();
+  }
 
   const dateStamp = todayStamp();
   const regex = new RegExp(`^SR-${prefix}-${dateStamp}-(\\d{5})$`);
@@ -260,28 +284,21 @@ async function getReturnUsageSnapshot(
   session?: any,
 ) {
   const invoiceObjectIds = invoiceIds.map((id) => new Types.ObjectId(id));
-
   const query: any = {
     "invoiceReturns.invoiceId": { $in: invoiceObjectIds },
     status: { $nin: ["REJECTED", "CANCELLED"] },
   };
-
   if (excludeReturnId) {
     query._id = { $ne: new Types.ObjectId(excludeReturnId) };
   }
-
   let q = SalesReturn.find(query).select("status invoiceReturns");
   if (session) q = q.session(session);
-
   const returns = await q.lean();
-
   const qtyByInvoiceProduct = new Map<string, number>();
   const amountByInvoice = new Map<string, number>();
-
   for (const ret of returns || []) {
     for (const block of ret.invoiceReturns || []) {
       const invoiceId = String(block.invoiceId);
-
       for (const item of block.items || []) {
         const qty = getEffectiveQtyByStatus(item, ret.status as ReturnStatus);
         const invoiceItem = {
@@ -289,10 +306,8 @@ async function getReturnUsageSnapshot(
           bonusQty: item.soldBonusQty,
           lineTotal: item.soldLineTotal,
         };
-
         const amount = getLineReturnAmount(invoiceItem, qty);
         const key = mkKey(invoiceId, item.productId);
-
         qtyByInvoiceProduct.set(key, (qtyByInvoiceProduct.get(key) || 0) + qty);
         amountByInvoice.set(
           invoiceId,
@@ -301,7 +316,6 @@ async function getReturnUsageSnapshot(
       }
     }
   }
-
   return { qtyByInvoiceProduct, amountByInvoice };
 }
 
@@ -321,7 +335,6 @@ function recalcSummary(returnDoc: any) {
   let requested = 0;
   let approved = 0;
   let received = 0;
-
   for (const block of returnDoc.invoiceReturns || []) {
     for (const item of block.items || []) {
       requested += getRequestedQty(item);
@@ -329,7 +342,6 @@ function recalcSummary(returnDoc: any) {
       received += Number(item.warehouseReceivedQty || 0);
     }
   }
-
   returnDoc.totalRequestedAmount = round2(requested);
   returnDoc.totalApprovedAmount = round2(approved);
   returnDoc.totalReceivedAmount = round2(received);
@@ -352,6 +364,13 @@ async function validateCapacityAgainstInvoices(
 
   for (const block of returnDoc.invoiceReturns || []) {
     const invoice = await getInvoiceById(String(block.invoiceId), session);
+
+    const order = await getOrderById(String(block.orderId), session);
+    if (order.status !== "DELIVERED") {
+      throw new Error(
+        `Order ${order.orderNo} must be delivered before returns can be made`,
+      );
+    }
 
     if (String(invoice.customerId) !== String(returnDoc.customerId)) {
       throw new Error("Invoice does not belong to the selected dealer");
@@ -590,6 +609,54 @@ async function applyApprovalStage(
   });
 }
 
+// ---------- Accounting helpers ----------
+async function getDealerARAccount(
+  dealerName: string,
+  dealerPhone: string,
+  session?: any,
+) {
+  const name = `${dealerName} ${dealerPhone}`;
+  return (accountService as any).getAccountByPath(
+    ["Assets", "Current Assets", "Accounts Receivable", name],
+    "Asset",
+    { session },
+  );
+}
+
+async function getSalesReturnsAccount(
+  dealerName: string,
+  dealerPhone: string,
+  session?: any,
+) {
+  const name = `${dealerName} ${dealerPhone}`;
+  return (accountService as any).getAccountByPath(
+    ["Revenue", "Sales Returns", name],
+    "Revenue",
+    { session },
+  );
+}
+
+async function getInventoryAccount(productName: string, session?: any) {
+  return (accountService as any).getAccountByPath(
+    ["Assets", "Current Assets", "Inventory", "Finished Goods", productName],
+    "Asset",
+    { session },
+  );
+}
+
+async function getCOGSAccount(productName: string, session?: any) {
+  return (accountService as any).getAccountByPath(
+    ["Expenses", "Cost of Goods Sold", "Sold Goods", productName],
+    "Expense",
+    { session },
+  );
+}
+
+function now() {
+  return new Date();
+}
+
+// ---------- REWRITTEN finalizeCompletion with stock transactions and balanced voucher ----------
 async function finalizeCompletion(
   returnDoc: any,
   session: any,
@@ -597,10 +664,21 @@ async function finalizeCompletion(
   remarks?: string,
 ) {
   let totalReceivedAmount = 0;
+  const voucherLines: any[] = [];
+  const dealer = await getDealerById(returnDoc.customerId, session);
+  const dealerARAccount = await getDealerARAccount(
+    dealer.name,
+    dealer.phoneNumber,
+    session,
+  );
+  const salesReturnsAccount = await getSalesReturnsAccount(
+    dealer.name,
+    dealer.phoneNumber,
+    session,
+  );
 
   for (const block of returnDoc.invoiceReturns || []) {
     let invoiceReceivedAmount = 0;
-
     const invoice = await getInvoiceById(String(block.invoiceId), session);
     const usage = await getReturnUsageSnapshot(
       [String(block.invoiceId)],
@@ -615,7 +693,6 @@ async function finalizeCompletion(
       const invoiceItem = (invoice.items || []).find(
         (invItem: any) => String(invItem.productId) === String(item.productId),
       );
-
       const soldPieces = getSoldPieces(invoiceItem);
       const receivedQty = Number(
         item.warehouseReceivedQty ||
@@ -632,7 +709,6 @@ async function finalizeCompletion(
           `Received qty must be greater than zero for product ${String(item.productId)}`,
         );
       }
-
       if (receivedQty > soldPieces) {
         throw new Error(
           `Received qty for product ${String(item.productId)} exceeds sold qty`,
@@ -640,11 +716,46 @@ async function finalizeCompletion(
       }
 
       item.warehouseReceivedQty = receivedQty;
+      // Use the selling price for return valuation (simplified)
       item.finalReturnAmount = getLineReturnAmount(invoiceItem, receivedQty);
       item.status = "COMPLETED";
 
       totalReceivedAmount += item.finalReturnAmount;
       invoiceReceivedAmount += item.finalReturnAmount;
+
+      // Create stock transaction (return in)
+      await stockTransactionService.create({
+        itemType: "Product",
+        itemId: String(item.productId),
+        locationId: String(block.warehouseId),
+        transactionType: "return",       // using "return" type; ensure enum supports it
+        quantity: receivedQty,
+        unitCost: item.soldUnitPrice,     // using selling price as cost temporarily
+        totalCost: item.finalReturnAmount,
+        transactionDate: now(),
+        createdBy: userId,
+        remainingQuantity: receivedQty,
+      }, session);
+
+      // Prepare inventory & COGS lines for the voucher (using selling price)
+      const product = await Product.findById(item.productId).session(session).lean();
+      if (product) {
+        const inventoryAccount = await getInventoryAccount(product.name, session);
+        const cogsAccount = await getCOGSAccount(product.name, session);
+
+        voucherLines.push({
+          accountId: inventoryAccount._id,
+          debit: item.finalReturnAmount,
+          credit: 0,
+          narration: `Return of ${product.name} from invoice ${invoice.invoiceNo}`,
+        });
+        voucherLines.push({
+          accountId: cogsAccount._id,
+          debit: 0,
+          credit: item.finalReturnAmount,
+          narration: `Cost recovery for returned ${product.name}`,
+        });
+      }
     }
 
     const invoiceBalanceSnapshot = Number(
@@ -653,13 +764,6 @@ async function finalizeCompletion(
     const remainingRefundable = round2(
       invoiceBalanceSnapshot - otherAmountUsed,
     );
-
-    // if (totalReceivedAmount > remainingRefundable) {
-    //   throw new Error(
-    //     `Final return amount exceeds refundable balance for invoice ${invoice.invoiceNo}`,
-    //   );
-    // }
-
     if (invoiceReceivedAmount > remainingRefundable) {
       throw new Error(
         `Final return amount exceeds refundable balance for invoice ${invoice.invoiceNo}`,
@@ -667,39 +771,73 @@ async function finalizeCompletion(
     }
   }
 
+  // Revenue reversal lines
+  voucherLines.push({
+    accountId: salesReturnsAccount._id,
+    debit: totalReceivedAmount,
+    credit: 0,
+    narration: `Sales return for ${dealer.name} – ${returnDoc.returnNo}`,
+  });
+  voucherLines.push({
+    accountId: dealerARAccount._id,
+    debit: 0,
+    credit: totalReceivedAmount,
+    narration: `Reduction of receivable for return ${returnDoc.returnNo}`,
+  });
+
+  console.log(`Total received amount: ${totalReceivedAmount}`);
+  console.log(`Voucher lines:`, voucherLines);
+
+  // Voucher is now balanced: total debits = total credits = 2 * totalReceivedAmount
+  await voucherService.create({
+    voucherNo: `SR-${returnDoc.returnNo}-${Date.now()}`,
+    date: now(),
+    type: "Journal",
+    narration: `Sales return ${returnDoc.returnNo} for dealer ${dealer.name}`,
+    lines: voucherLines,
+    status: "Approved",
+    createdBy: userId,
+  }, session);
+
+  // ---- Physical stock update (already present) ----
   for (const block of returnDoc.invoiceReturns || []) {
     for (const item of block.items || []) {
       const receivedQty = Number(item.warehouseReceivedQty || 0);
-      const invoice = await getInvoiceById(String(block.invoiceId), session);
-      const invoiceItem = (invoice.items || []).find(
-        (invItem: any) => String(invItem.productId) === String(item.productId),
-      );
-
       const stock = await ProductStock.findOne({
         productId: item.productId,
         warehouseId: block.warehouseId,
       }).session(session);
 
       if (!stock) {
-        throw new Error(
-          `Stock not found for product ${String(item.productId)} in warehouse`,
+        await ProductStock.create(
+          [
+            {
+              productId: item.productId,
+              warehouseId: block.warehouseId,
+              quantity: receivedQty,
+              unit: "pcs",
+              lastUpdated: new Date(),
+            },
+          ],
+          { session },
         );
+      } else {
+        stock.quantity = (stock.quantity || 0) + receivedQty;
+        stock.lastUpdated = new Date();
+        await stock.save({ session });
       }
-
-      stock.quantity = (stock.quantity || 0) + receivedQty;
-      stock.lastUpdated = new Date();
-      await stock.save({ session });
     }
   }
 
+  // ---- Dealer due reduction ----
   const Dealer = SalesReturn.db.model("Dealer");
-  const dealer = await Dealer.findById(returnDoc.customerId).session(session);
-  if (dealer) {
-    dealer.currentDue = Math.max(
+  const dealerDoc = await Dealer.findById(returnDoc.customerId).session(session);
+  if (dealerDoc) {
+    dealerDoc.currentDue = Math.max(
       0,
-      (dealer.currentDue || 0) - totalReceivedAmount,
+      (dealerDoc.currentDue || 0) - totalReceivedAmount,
     );
-    await dealer.save({ session });
+    await dealerDoc.save({ session });
   }
 
   returnDoc.totalReceivedAmount = round2(totalReceivedAmount);
@@ -721,22 +859,48 @@ async function finalizeCompletion(
   await returnDoc.save({ session });
 }
 
+// ---------- Returnable quantities helper ----------
+async function getReturnableQuantities(invoiceId: string, session?: any) {
+  const invoice = await getInvoiceById(invoiceId, session);
+  if (!invoice) throw new Error("Invoice not found");
+
+  const usage = await getReturnUsageSnapshot([invoiceId], undefined, session);
+  const result: Array<{
+    productId: string;
+    soldQty: number;
+    alreadyReturnedQty: number;
+    remainingQty: number;
+  }> = [];
+  for (const invoiceItem of invoice.items || []) {
+    const productId = String(invoiceItem.productId);
+    const soldPieces = getSoldPieces(invoiceItem);
+    const key = mkKey(invoiceId, productId);
+    const usedQty = Number(usage.qtyByInvoiceProduct.get(key) || 0);
+    result.push({
+      productId,
+      soldQty: soldPieces,
+      alreadyReturnedQty: usedQty,
+      remainingQty: Math.max(0, soldPieces - usedQty),
+    });
+  }
+  return result;
+}
+
+// ===================== PUBLIC SERVICE =====================
 export const salesReturnService = {
   ...base,
+
+  getReturnableQuantities,
 
   async getPrintableReturnData(returnId: string) {
     const returnDoc: any = await SalesReturn.findById(returnId).populate(
       defaultPopulate as any,
     );
-
     if (!returnDoc) throw new Error("Sales return not found");
-
     if (!returnDoc.qrCode) {
       returnDoc.qrCode = buildReturnQrPayload(returnDoc);
     }
-
     const qrCodeImage = await generateReturnQrImage(returnDoc);
-
     return {
       returnDoc,
       qrCodeImage,

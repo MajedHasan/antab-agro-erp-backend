@@ -391,4 +391,34 @@ export const salesReturnController = {
       next(err);
     }
   },
+
+  /* ================================
+     RETURN QUANTITIES
+     GET /sales-returns/returnable-quantities?invoiceId=...
+  ================================= */
+  getReturnableQuantities: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const { invoiceId } = req.query;
+
+      if (!invoiceId || typeof invoiceId !== "string") {
+        return res.status(400).json({
+          success: false,
+          message: "invoiceId query parameter is required",
+        });
+      }
+
+      const data = await salesReturnService.getReturnableQuantities(invoiceId as string);
+
+      res.json({
+        success: true,
+        data,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
 };

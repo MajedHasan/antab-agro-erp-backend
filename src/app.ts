@@ -83,6 +83,9 @@ import statementOfChangesInEquityRoutes from "./routes/statement-of-changes-in-e
 import trialBalanceRoutes from "./routes/trial-balance.routes";
 import ledgerRoutes from "./routes/ledger.routes";
 
+import dealerLedgerRoutes from "./modules/dealer/ledger/dealer-ledger.routes";
+
+
 /* ===== REPORTS ===== */
 import reportRoutes from "./modules/reports/reports.routes";
 import stockTransactionRoutes from "./modules/stockTransaction/stockTransaction.routes";
@@ -225,6 +228,9 @@ app.use(
 app.use("/api/reports/financial-notes", financialNotesRoutes);
 app.use("/api/reports/changes-in-equity", statementOfChangesInEquityRoutes);
 app.use("/api/reports/trial-balance", trialBalanceRoutes);
+
+app.use("/api/dealer-ledger", dealerLedgerRoutes);
+
 
 /* ===== REPORTS ===== */
 app.use("/api/report", reportRoutes);

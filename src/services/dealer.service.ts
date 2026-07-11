@@ -270,10 +270,13 @@ export const dealerService = {
     const dealer = await DealerModel.findById(dealerId).lean().exec();
     if (!dealer) return;
 
+    // 🆕 Build dealer name with phone number
+    const dealerNameWithPhone = `${(dealer as any).name} ${(dealer as any).phoneNumber || ""}`.trim();
+
     if ((dealer as any).accountId) {
       try {
         await accountService.update(String((dealer as any).accountId), {
-          name: (dealer as any).name,
+          name: dealerNameWithPhone,
         });
       } catch {
         // ignore
@@ -299,7 +302,7 @@ export const dealerService = {
         account = await (accountService as any).createAutoAccountForEntity({
           entityType: "Dealer",
           entityId: String((dealer as any)._id),
-          name: (dealer as any).name,
+          name: dealerNameWithPhone,   // 🆕 name with phone
         });
       } catch (err) {
         console.error(
@@ -309,7 +312,7 @@ export const dealerService = {
 
         try {
           account = await accountService.create({
-            name: (dealer as any).name,
+            name: dealerNameWithPhone,  // 🆕 name with phone
             code: `DLR-${(dealer as any).code || (dealer as any)._id}`,
             type: "Asset",
             category: "Accounts Receivable",
@@ -325,10 +328,10 @@ export const dealerService = {
         }
       }
     } else {
-      if (account.name !== (dealer as any).name) {
+      if (account.name !== dealerNameWithPhone) {
         try {
           await accountService.update(String(account._id || account.id), {
-            name: (dealer as any).name,
+            name: dealerNameWithPhone,  // 🆕 name with phone
           });
         } catch {
           // ignore
@@ -387,10 +390,13 @@ export const dealerService = {
     const dealer = await DealerModel.findById(dealerId).lean().exec();
     if (!dealer) return;
 
+    // 🆕 Build dealer name with phone number
+    const dealerNameWithPhone = `${(dealer as any).name} ${(dealer as any).phoneNumber || ""}`.trim();
+
     if ((dealer as any).accountId) {
       try {
         await accountService.update(String((dealer as any).accountId), {
-          name: (dealer as any).name,
+          name: dealerNameWithPhone,
         });
       } catch {
         // ignore
@@ -408,7 +414,7 @@ export const dealerService = {
 
       if (acc && acc._id) {
         await accountService.update(String(acc._id), {
-          name: (dealer as any).name,
+          name: dealerNameWithPhone,
         });
 
         await DealerModel.findByIdAndUpdate(dealerId, {

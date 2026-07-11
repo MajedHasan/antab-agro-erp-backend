@@ -34,6 +34,9 @@ router.post("/:id/complete", salesReturnController.complete);
 /* ---------- CANCEL ---------- */
 router.post("/:id/cancel", salesReturnController.cancel);
 
+/* ---------- RETURN QUANTITIES ---------- */
+router.get("/returnable-quantities", salesReturnController.getReturnableQuantities);
+
 /* ===============================
    STANDARD CRUD ROUTES
 ================================ */
