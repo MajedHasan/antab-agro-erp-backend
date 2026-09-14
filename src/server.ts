@@ -3,6 +3,8 @@ import app from "./app";
 import config from "./config";
 import logger from "./utils/logger";
 import seed from "./scripts/seedRoles";
+import seedRoles from "./scripts/seedRoles";
+import seedPermissions from "./scripts/seedPermissions";
 
 const port = config.port || 5001;
 
@@ -11,7 +13,9 @@ async function bootstrap() {
     await mongoose.connect(config.mongoUri);
     logger.info("Connected to MongoDB");
 
-    await seed();
+     // RBAC must be seeded in this order.
+    await seedPermissions();
+    await seedRoles();
 
     const server = app.listen(port, () => {
       logger.info(`Server listening on port ${port}`);
