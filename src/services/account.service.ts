@@ -616,12 +616,12 @@ async function ensureAccountExists({
     opts.entityId,
   )}`;
 
-  // const acc = await Account.findOne({
-  //   systemKey: systemKeyForEntity,
-  //   deletedAt: { $exists: false },
-  // }).exec();
+  const acc = await Account.findOne({
+    systemKey: systemKeyForEntity,
+    deletedAt: { $exists: false },
+  }).exec();
 
-  const acc = await Account.findById(opts.entityId).exec();
+  // const acc = await Account.findById(opts.entityId).exec();
 
   if (!acc) {
     // nothing to sync

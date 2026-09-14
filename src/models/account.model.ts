@@ -22,6 +22,14 @@ const accountSchema = new Schema(
     taxType: { type: String }, // optional for Revenue
     deletedAt: { type: Date, default: undefined }, // soft delete
 
+    systemKey: {
+      type: String,
+      trim: true,
+      unique: true,
+      sparse: true,
+      index: true,
+    },
+
     // Profit & Loss grouping
     plGroup: {
       type: String,

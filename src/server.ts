@@ -5,6 +5,9 @@ import logger from "./utils/logger";
 import seed from "./scripts/seedRoles";
 import seedRoles from "./scripts/seedRoles";
 import seedPermissions from "./scripts/seedPermissions";
+import chartOfAccountsSeed from "./scripts/chart-of-accounts.seed";
+import seedGeography from "./scripts/geography.seed";
+import { seedUsers } from "./scripts/users.seed";
 
 const port = config.port || 5001;
 
@@ -16,6 +19,9 @@ async function bootstrap() {
      // RBAC must be seeded in this order.
     await seedPermissions();
     await seedRoles();
+    await chartOfAccountsSeed();
+    await seedGeography();
+    await seedUsers();
 
     const server = app.listen(port, () => {
       logger.info(`Server listening on port ${port}`);
