@@ -31,6 +31,7 @@ const CRUD_RESOURCES: Record<string, string> = {
 
   warehousetransfer: "Warehouse Transfers",
   salesledger: "Sales Ledger",
+  dealerledger: "Dealer Ledger",
   dealer: "Dealers",
   zone: "Zones",
   region: "Regions",
@@ -108,10 +109,10 @@ permissions.push(
     name: "supplier.reject",
     description: "Reject suppliers",
   },
-  {
-    name: "dealerledger.edit",
-    description: "Edit dealer ledger",
-  }
+  // {
+  //   name: "dealerledger.edit",
+  //   description: "Edit dealer ledger",
+  // }
 );
 
 export default async function seedPermissions() {

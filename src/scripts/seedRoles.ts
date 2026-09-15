@@ -652,7 +652,7 @@ const roles: RoleSeed[] = [
   // ============================================================
 
   {
-    name: "Software Developer",
+    name: "Developer",
     department: "IT",
     permissions: [
       "dashboard.view",
