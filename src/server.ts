@@ -2,7 +2,6 @@ import mongoose from "mongoose";
 import app from "./app";
 import config from "./config";
 import logger from "./utils/logger";
-import seed from "./scripts/seedRoles";
 import seedRoles from "./scripts/seedRoles";
 import seedPermissions from "./scripts/seedPermissions";
 import chartOfAccountsSeed from "./scripts/chart-of-accounts.seed";

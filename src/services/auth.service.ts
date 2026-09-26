@@ -131,8 +131,10 @@ export async function loginUser(payload: { email: string; password: string }) {
     const accessToken = signAccessToken({
       sub: user._id.toString(),
       email: user.email,
-      role: user.role,
+      // role: user.role,
+      role: user.role?._id?.toString?.(),
     });
+    // const accessToken = signAccessToken({ sub: user._id.toString() });
 
     const jti = uuidv4();
     const refreshToken = signRefreshToken({ sub: user._id.toString(), jti });
