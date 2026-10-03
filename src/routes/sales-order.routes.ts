@@ -3,8 +3,15 @@
 import { Router } from "express";
 import { createCrudRouter } from "./crud.routes";
 import { salesOrderController } from "../controllers/sales-order.controller";
+import salesOrderImportRouter from "../modules/sales/sales-order-import.routes";
 
 const router = Router();
+
+
+router.use(
+  "/import",
+  salesOrderImportRouter,
+);
 
 /* =====================================================
    SALES ORDER WORKFLOW ROUTES
