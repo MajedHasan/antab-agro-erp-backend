@@ -85,6 +85,8 @@ import ledgerRoutes from "./routes/ledger.routes";
 
 import dealerLedgerRoutes from "./modules/dealer/ledger/dealer-ledger.routes";
 
+import marketingRoutes from "./modules/marketing-setup/marketing.routes";
+
 
 /* ===== REPORTS ===== */
 import reportRoutes from "./modules/reports/reports.routes";
@@ -208,6 +210,7 @@ app.use("/api/workorders", requireAuth, workordersRoutes);
 app.use("/api/grs", requireAuth, goodReceiptRoutes);
 app.use("/api/tada", requireAuth, tadaRoutes);
 app.use("/api/prescriptions", requireAuth, prescriptionRoutes);
+app.use("/api/marketing", requireAuth, marketingRoutes);
 
 /* ===== ACCOUNTS ===== */
 app.use("/api/accounts", accountRoutes);
