@@ -114,6 +114,7 @@ export const salesOrderImportController = {
         "Payment Method",
         "Product SKU",
         "Qty",
+        "Price",
         "Bonus Qty Override",
         "Discount %",
         "Tax %",
@@ -132,6 +133,7 @@ export const salesOrderImportController = {
           "",
           "",
           "",
+          "",
           "Sample order",
         ],
         [
@@ -142,6 +144,7 @@ export const salesOrderImportController = {
           "CASH",
           "SKU-002",
           5,
+          150,
           "",
           5,
           "",
@@ -155,6 +158,7 @@ export const salesOrderImportController = {
           "CREDIT",
           "SKU-003",
           20,
+          "",
           0,
           "",
           0,
@@ -175,6 +179,7 @@ export const salesOrderImportController = {
         { wch: 18 },
         { wch: 20 },
         { wch: 12 },
+        { wch: 14 },
         { wch: 22 },
         { wch: 15 },
         { wch: 12 },
@@ -219,6 +224,11 @@ export const salesOrderImportController = {
         [
           "Qty",
           "Required. Must be greater than 0.",
+        ],
+
+        [
+          "Price",
+          "Optional. Blank = automatically use the product sale price. If provided, the entered price is used for that item. 0 is allowed.",
         ],
 
         [
@@ -429,8 +439,10 @@ export const salesOrderImportController = {
 
       const orderPayloads =
         salesOrderImportService.buildOrderPayloads(
-            preview.groups,
-            userId ? new Types.ObjectId(userId) : new Types.ObjectId(),
+          preview.groups,
+          userId
+            ? new Types.ObjectId(userId)
+            : new Types.ObjectId(),
         );
 
       if (orderPayloads.length === 0) {
@@ -509,7 +521,9 @@ export const salesOrderImportController = {
           const order =
             (await salesOrderService.create(
               createPayload,
-            )) as CreatedSalesOrder | undefined;
+            )) as
+              | CreatedSalesOrder
+              | undefined;
 
           /* -------------------------------------------
              TypeScript/runtime guard
@@ -602,6 +616,7 @@ export const salesOrderImportController = {
         )
         .json({
           success: allSuccessful,
+
           partialSuccess:
             partiallySuccessful,
 

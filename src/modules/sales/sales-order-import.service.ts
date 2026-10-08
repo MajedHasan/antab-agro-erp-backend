@@ -1,8 +1,11 @@
 import * as XLSX from "xlsx";
+
 import { Types } from "mongoose";
 
 import Dealer from "../../models/dealer.model";
+
 import WarehouseOrFactory from "../../models/warehouseOrFactory.model";
+
 import Product from "../../models/product.model";
 
 import { promotionService } from "../../services/product-promotion.service";
@@ -21,22 +24,35 @@ export interface SalesOrderImportRow {
   rowNumber: number;
 
   importReference: string;
+
   dealerCode: string;
+
   warehouseCode: string;
+
   orderDate: Date | null;
 
   paymentMethod: "CASH" | "CREDIT" | "";
 
   productSku: string;
+
   qty: number | null;
 
+  // Optional Excel price override.
+  // Blank = use product salePrice.
+  price: number | null;
+
+  hasPrice: boolean;
+
   bonusQtyOverride: number | null;
+
   hasBonusQtyOverride: boolean;
 
   discountPercent: number;
+
   taxPercent: number;
 
   hasDiscountPercent: boolean;
+
   hasTaxPercent: boolean;
 
   notes: string;
@@ -44,24 +60,36 @@ export interface SalesOrderImportRow {
   errors: string[];
 }
 
-export interface ResolvedSalesOrderImportRow extends SalesOrderImportRow {
+export interface ResolvedSalesOrderImportRow
+  extends SalesOrderImportRow {
   dealerId?: Types.ObjectId;
+
   dealerName?: string;
+
   dealerType?: string;
+
   dealerStatus?: string;
 
   warehouseId?: Types.ObjectId;
+
   warehouseName?: string;
+
   warehouseType?: string;
+
   warehouseStatus?: string;
 
   productId?: Types.ObjectId;
+
   productName?: string;
+
   productSalePrice?: number;
+
   productTaxRate?: number;
+
   productStatus?: string;
 
   promotionBonusQty: number;
+
   appliedPromotionId?: string;
 
   finalBonusQty: number;
@@ -69,9 +97,13 @@ export interface ResolvedSalesOrderImportRow extends SalesOrderImportRow {
   unitPrice: number;
 
   grossAmount: number;
+
   discountAmount: number;
+
   taxableAmount: number;
+
   taxAmount: number;
+
   lineTotal: number;
 }
 
@@ -79,14 +111,19 @@ export interface SalesOrderImportGroup {
   importReference: string;
 
   dealerId?: Types.ObjectId;
+
   dealerCode: string;
+
   dealerName?: string;
 
   warehouseId?: Types.ObjectId;
+
   warehouseCode: string;
+
   warehouseName?: string;
 
   orderDate: Date | null;
+
   paymentMethod: "CASH" | "CREDIT" | "";
 
   notes: string;
@@ -94,12 +131,17 @@ export interface SalesOrderImportGroup {
   items: ResolvedSalesOrderImportRow[];
 
   totalQty: number;
+
   totalBonusQty: number;
 
   subtotal: number;
+
   discountAmount: number;
+
   taxableAmount: number;
+
   taxAmount: number;
+
   grandTotal: number;
 
   errors: string[];
@@ -107,22 +149,31 @@ export interface SalesOrderImportGroup {
 
 export interface SalesOrderImportPreview {
   rows: ResolvedSalesOrderImportRow[];
+
   groups: SalesOrderImportGroup[];
 
   totalRows: number;
+
   validRows: number;
+
   invalidRows: number;
 
   totalOrders: number;
+
   validOrders: number;
+
   invalidOrders: number;
 
   totalQty: number;
+
   totalBonusQty: number;
 
   subtotal: number;
+
   discountAmount: number;
+
   taxAmount: number;
+
   grandTotal: number;
 
   errors: string[];
@@ -130,23 +181,29 @@ export interface SalesOrderImportPreview {
 
 export interface SalesOrderImportItemPayload {
   productId: Types.ObjectId;
+
   warehouseId: Types.ObjectId;
 
   qty: number;
+
   bonusQty: number;
 
   unitPrice: number;
 
   discountPercent: number;
+
   discountAmount: number;
 
   taxPercent: number;
+
   taxAmount: number;
 
   lineSubtotal: number;
+
   lineTotal: number;
 
   productSku: string;
+
   productName: string;
 }
 
@@ -154,16 +211,21 @@ export interface SalesOrderImportOrderPayload {
   importReference: string;
 
   customerId: Types.ObjectId;
+
   warehouseId: Types.ObjectId;
 
   orderDate: Date;
+
   paymentMethod: "CASH" | "CREDIT";
 
   items: SalesOrderImportItemPayload[];
 
   subTotal: number;
+
   totalDiscount: number;
+
   totalTax: number;
+
   grandTotal: number;
 
   totalBonusQty: number;
@@ -299,10 +361,16 @@ function parseExcelDate(value: unknown): Date | null {
 
     if (slashMatch) {
       const day = Number(slashMatch[1]);
+
       const month = Number(slashMatch[2]);
+
       const year = Number(slashMatch[3]);
 
-      const parsed = new Date(year, month - 1, day);
+      const parsed = new Date(
+        year,
+        month - 1,
+        day,
+      );
 
       if (
         parsed.getFullYear() === year &&
@@ -328,7 +396,8 @@ function parseExcelDate(value: unknown): Date | null {
 function normalizePaymentMethod(
   value: unknown,
 ): "CASH" | "CREDIT" | "" {
-  const paymentMethod = normalizeString(value).toUpperCase();
+  const paymentMethod =
+    normalizeString(value).toUpperCase();
 
   if (paymentMethod === "CASH") {
     return "CASH";
@@ -345,19 +414,25 @@ function validateHeaders(headers: string[]): string[] {
   const errors: string[] = [];
 
   const normalizedHeaders = new Set(
-    headers.map((header) => normalizeString(header)),
+    headers.map((header) =>
+      normalizeString(header),
+    ),
   );
 
   for (const requiredColumn of REQUIRED_COLUMNS) {
     if (!normalizedHeaders.has(requiredColumn)) {
-      errors.push(`Missing required column: ${requiredColumn}`);
+      errors.push(
+        `Missing required column: ${requiredColumn}`,
+      );
     }
   }
 
   return errors;
 }
 
-function validateRow(row: SalesOrderImportRow): void {
+function validateRow(
+  row: SalesOrderImportRow,
+): void {
   const errors = row.errors;
 
   if (!row.importReference) {
@@ -379,7 +454,9 @@ function validateRow(row: SalesOrderImportRow): void {
   }
 
   if (!row.paymentMethod) {
-    errors.push("Payment Method must be CASH or CREDIT");
+    errors.push(
+      "Payment Method must be CASH or CREDIT",
+    );
   }
 
   if (!row.productSku) {
@@ -387,13 +464,43 @@ function validateRow(row: SalesOrderImportRow): void {
   }
 
   if (row.qty === null) {
-    errors.push("Qty is required and must be a number");
+    errors.push(
+      "Qty is required and must be a number",
+    );
   } else if (row.qty <= 0) {
-    errors.push("Qty must be greater than 0");
+    errors.push(
+      "Qty must be greater than 0",
+    );
   }
 
-  if (row.qty !== null && !Number.isFinite(row.qty)) {
-    errors.push("Qty must be a valid number");
+  if (
+    row.qty !== null &&
+    !Number.isFinite(row.qty)
+  ) {
+    errors.push(
+      "Qty must be a valid number",
+    );
+  }
+
+  /*
+   * Price override:
+   *
+   * blank = use product salePrice
+   * 0     = explicitly use 0
+   * 150   = use 150
+   *
+   * Negative prices are not allowed.
+   */
+  if (row.hasPrice) {
+    if (row.price === null) {
+      errors.push(
+        "Price must be a number when provided",
+      );
+    } else if (row.price < 0) {
+      errors.push(
+        "Price cannot be negative",
+      );
+    }
   }
 
   if (row.hasBonusQtyOverride) {
@@ -405,7 +512,9 @@ function validateRow(row: SalesOrderImportRow): void {
       errors.push(
         "Bonus Qty Override cannot be negative",
       );
-    } else if (!Number.isInteger(row.bonusQtyOverride)) {
+    } else if (
+      !Number.isInteger(row.bonusQtyOverride)
+    ) {
       errors.push(
         "Bonus Qty Override must be a whole number",
       );
@@ -413,7 +522,9 @@ function validateRow(row: SalesOrderImportRow): void {
   }
 
   if (Number.isNaN(row.discountPercent)) {
-    errors.push("Discount % must be a number");
+    errors.push(
+      "Discount % must be a number",
+    );
   } else if (
     row.discountPercent < 0 ||
     row.discountPercent > 100
@@ -424,7 +535,9 @@ function validateRow(row: SalesOrderImportRow): void {
   }
 
   if (Number.isNaN(row.taxPercent)) {
-    errors.push("Tax % must be a number");
+    errors.push(
+      "Tax % must be a number",
+    );
   } else if (
     row.taxPercent < 0 ||
     row.taxPercent > 100
@@ -439,20 +552,39 @@ function calculateLineAmounts(
   row: ResolvedSalesOrderImportRow,
 ): void {
   const qty = row.qty || 0;
-  const unitPrice = Number(row.productSalePrice || 0);
 
-  const grossAmount = roundMoney(qty * unitPrice);
+  /*
+   * Price:
+   *
+   * Excel Price provided -> use Excel Price.
+   * Excel Price blank -> use Product.salePrice.
+   *
+   * Using hasPrice is important because 0 is a valid
+   * explicit price override.
+   */
+  const unitPrice = row.hasPrice
+    ? Number(row.price ?? 0)
+    : Number(row.productSalePrice || 0);
+
+  const grossAmount = roundMoney(
+    qty * unitPrice,
+  );
 
   const discountAmount = roundMoney(
-    grossAmount * (row.discountPercent / 100),
+    grossAmount *
+      (row.discountPercent / 100),
   );
 
   const taxableAmount = roundMoney(
-    Math.max(0, grossAmount - discountAmount),
+    Math.max(
+      0,
+      grossAmount - discountAmount,
+    ),
   );
 
   const taxAmount = roundMoney(
-    taxableAmount * (row.taxPercent / 100),
+    taxableAmount *
+      (row.taxPercent / 100),
   );
 
   const lineTotal = roundMoney(
@@ -460,10 +592,15 @@ function calculateLineAmounts(
   );
 
   row.unitPrice = unitPrice;
+
   row.grossAmount = grossAmount;
+
   row.discountAmount = discountAmount;
+
   row.taxableAmount = taxableAmount;
+
   row.taxAmount = taxAmount;
+
   row.lineTotal = lineTotal;
 }
 
@@ -472,7 +609,9 @@ export const salesOrderImportService = {
     buffer: Buffer,
   ): Record<string, unknown>[] {
     if (!buffer || buffer.length === 0) {
-      throw new Error("Excel file is empty");
+      throw new Error(
+        "Excel file is empty",
+      );
     }
 
     const workbook = XLSX.read(buffer, {
@@ -488,7 +627,8 @@ export const salesOrderImportService = {
       );
     }
 
-    const firstSheetName = workbook.SheetNames[0];
+    const firstSheetName =
+      workbook.SheetNames[0];
 
     if (!firstSheetName) {
       throw new Error(
@@ -496,7 +636,8 @@ export const salesOrderImportService = {
       );
     }
 
-    const worksheet = workbook.Sheets[firstSheetName];
+    const worksheet =
+      workbook.Sheets[firstSheetName];
 
     if (!worksheet) {
       throw new Error(
@@ -518,7 +659,8 @@ export const salesOrderImportService = {
     rows: SalesOrderImportRow[];
     errors: string[];
   } {
-    const rawRows = this.parseWorkbook(buffer);
+    const rawRows =
+      this.parseWorkbook(buffer);
 
     if (rawRows.length === 0) {
       throw new Error(
@@ -526,9 +668,12 @@ export const salesOrderImportService = {
       );
     }
 
-    const headers = Object.keys(rawRows[0] || {});
+    const headers = Object.keys(
+      rawRows[0] || {},
+    );
 
-    const headerErrors = validateHeaders(headers);
+    const headerErrors =
+      validateHeaders(headers);
 
     if (headerErrors.length > 0) {
       return {
@@ -538,7 +683,13 @@ export const salesOrderImportService = {
     }
 
     const rows = rawRows.map(
-      (rawRow, index): SalesOrderImportRow => {
+      (
+        rawRow,
+        index,
+      ): SalesOrderImportRow => {
+        const rawPrice =
+          rawRow["Price"];
+
         const rawBonusOverride =
           rawRow["Bonus Qty Override"];
 
@@ -547,6 +698,18 @@ export const salesOrderImportService = {
 
         const rawTax =
           rawRow["Tax %"];
+
+        /*
+         * Price is optional.
+         *
+         * Blank = fallback to Product.salePrice.
+         * Any actual value, including 0, means
+         * the user explicitly supplied a price.
+         */
+        const hasPrice =
+          rawPrice !== undefined &&
+          rawPrice !== null &&
+          String(rawPrice).trim() !== "";
 
         const hasBonusQtyOverride =
           rawBonusOverride !== undefined &&
@@ -566,52 +729,74 @@ export const salesOrderImportService = {
         const row: SalesOrderImportRow = {
           rowNumber: index + 2,
 
-          importReference: normalizeString(
-            rawRow["Import Reference"],
-          ),
+          importReference:
+            normalizeString(
+              rawRow["Import Reference"],
+            ),
 
-          dealerCode: normalizeString(
-            rawRow["Dealer Code"],
-          ),
+          dealerCode:
+            normalizeString(
+              rawRow["Dealer Code"],
+            ),
 
-          warehouseCode: normalizeString(
-            rawRow["Warehouse Code"],
-          ),
+          warehouseCode:
+            normalizeString(
+              rawRow["Warehouse Code"],
+            ),
 
-          orderDate: parseExcelDate(
-            rawRow["Order Date"],
-          ),
+          orderDate:
+            parseExcelDate(
+              rawRow["Order Date"],
+            ),
 
-          paymentMethod: normalizePaymentMethod(
-            rawRow["Payment Method"],
-          ),
+          paymentMethod:
+            normalizePaymentMethod(
+              rawRow["Payment Method"],
+            ),
 
-          productSku: normalizeString(
-            rawRow["Product SKU"],
-          ),
+          productSku:
+            normalizeString(
+              rawRow["Product SKU"],
+            ),
 
-          qty: parseNumber(
-            rawRow["Qty"],
-          ),
+          qty:
+            parseNumber(
+              rawRow["Qty"],
+            ),
 
-          bonusQtyOverride: hasBonusQtyOverride
-            ? parseNumber(rawBonusOverride)
+          price: hasPrice
+            ? parseNumber(rawPrice)
             : null,
+
+          hasPrice,
+
+          bonusQtyOverride:
+            hasBonusQtyOverride
+              ? parseNumber(
+                  rawBonusOverride,
+                )
+              : null,
 
           hasBonusQtyOverride,
 
           discountPercent:
-            parsePercentage(rawDiscount),
+            parsePercentage(
+              rawDiscount,
+            ),
 
           taxPercent:
-            parsePercentage(rawTax),
+            parsePercentage(
+              rawTax,
+            ),
 
           hasDiscountPercent,
+
           hasTaxPercent,
 
-          notes: normalizeString(
-            rawRow["Notes"],
-          ),
+          notes:
+            normalizeString(
+              rawRow["Notes"],
+            ),
 
           errors: [],
         };
@@ -638,7 +823,11 @@ export const salesOrderImportService = {
     const dealerCodes = [
       ...new Set(
         rows
-          .map((row) => normalizeCode(row.dealerCode))
+          .map((row) =>
+            normalizeCode(
+              row.dealerCode,
+            ),
+          )
           .filter(Boolean),
       ),
     ];
@@ -647,7 +836,9 @@ export const salesOrderImportService = {
       ...new Set(
         rows
           .map((row) =>
-            normalizeCode(row.warehouseCode),
+            normalizeCode(
+              row.warehouseCode,
+            ),
           )
           .filter(Boolean),
       ),
@@ -657,50 +848,66 @@ export const salesOrderImportService = {
       ...new Set(
         rows
           .map((row) =>
-            normalizeCode(row.productSku),
+            normalizeCode(
+              row.productSku,
+            ),
           )
           .filter(Boolean),
       ),
     ];
 
     const [
-    dealers,
-    warehouses,
-    products,
+      dealers,
+      warehouses,
+      products,
     ] = await Promise.all([
-        Dealer.find({
-            code: {
-            $in: dealerCodes.map(
-                (code) => new RegExp(`^${escapeRegex(code)}$`, "i"),
-            ),
-            },
-        })
-            .select(
-            "_id code name status type creditLimit currentDue",
-            )
-            .lean(),
+      Dealer.find({
+        code: {
+          $in: dealerCodes.map(
+            (code) =>
+              new RegExp(
+                `^${escapeRegex(code)}$`,
+                "i",
+              ),
+          ),
+        },
+      })
+        .select(
+          "_id code name status type creditLimit currentDue",
+        )
+        .lean(),
 
-        WarehouseOrFactory.find({
-            code: {
-            $in: warehouseCodes.map(
-                (code) => new RegExp(`^${escapeRegex(code)}$`, "i"),
-            ),
-            },
-        })
-            .select("_id code name type status")
-            .lean(),
+      WarehouseOrFactory.find({
+        code: {
+          $in: warehouseCodes.map(
+            (code) =>
+              new RegExp(
+                `^${escapeRegex(code)}$`,
+                "i",
+              ),
+          ),
+        },
+      })
+        .select(
+          "_id code name type status",
+        )
+        .lean(),
 
-        Product.find({
-            sku: {
-            $in: productSkus.map(
-                (sku) => new RegExp(`^${escapeRegex(sku)}$`, "i"),
-            ),
-            },
-        })
-            .select(
-            "_id sku name salePrice taxRate status defaultBonusRule",
-            )
-            .lean(),
+      Product.find({
+        sku: {
+          $in: productSkus.map(
+            (sku) =>
+              new RegExp(
+                `^${escapeRegex(sku)}$`,
+                "i",
+              ),
+          ),
+        },
+      })
+        .select(
+          "_id sku name salePrice taxRate status defaultBonusRule",
+        )
+        .lean(),
     ]);
 
     const dealerMap = new Map<
@@ -722,7 +929,9 @@ export const salesOrderImportService = {
 
     for (const warehouse of warehouses) {
       warehouseMap.set(
-        normalizeCode(warehouse.code),
+        normalizeCode(
+          warehouse.code,
+        ),
         warehouse,
       );
     }
@@ -746,7 +955,8 @@ export const salesOrderImportService = {
         ): ResolvedSalesOrderImportRow => {
           const resolved: ResolvedSalesOrderImportRow =
             {
-              rowNumber: row.rowNumber,
+              rowNumber:
+                row.rowNumber,
 
               importReference:
                 row.importReference,
@@ -768,6 +978,16 @@ export const salesOrderImportService = {
 
               qty:
                 row.qty,
+
+              /*
+               * Preserve the Excel price override
+               * through the resolve stage.
+               */
+              price:
+                row.price,
+
+              hasPrice:
+                row.hasPrice,
 
               bonusQtyOverride:
                 row.bonusQtyOverride,
@@ -824,7 +1044,9 @@ export const salesOrderImportService = {
             );
           } else {
             const dealerId =
-              toObjectId(dealer._id);
+              toObjectId(
+                dealer._id,
+              );
 
             if (!dealerId) {
               resolved.errors.push(
@@ -1015,6 +1237,7 @@ export const salesOrderImportService = {
              * 0     = explicitly disable bonus
              * 5     = force final bonus to 5
              */
+
             if (
               !row.hasBonusQtyOverride
             ) {
@@ -1048,11 +1271,9 @@ export const salesOrderImportService = {
 
     for (const row of rows) {
       if (row.errors.length > 0) {
-        row.promotionBonusQty =
-          0;
+        row.promotionBonusQty = 0;
 
-        row.finalBonusQty =
-          0;
+        row.finalBonusQty = 0;
       }
     }
 
@@ -1070,6 +1291,7 @@ export const salesOrderImportService = {
         const resolved: ResolvedSalesOrderImportRow =
           {
             ...row,
+
             errors: [
               ...row.errors,
             ],
@@ -1122,10 +1344,15 @@ export const salesOrderImportService = {
         row.qty <= 0
       ) {
         row.unitPrice = 0;
+
         row.grossAmount = 0;
+
         row.discountAmount = 0;
+
         row.taxableAmount = 0;
+
         row.taxAmount = 0;
+
         row.lineTotal = 0;
 
         continue;
@@ -1137,6 +1364,7 @@ export const salesOrderImportService = {
        * Excel value present -> use Excel value.
        * Excel blank -> 0%.
        */
+
       const discountPercent =
         row.hasDiscountPercent
           ? row.discountPercent
@@ -1151,6 +1379,7 @@ export const salesOrderImportService = {
        * Excel value present -> use Excel value.
        * Excel blank -> use Product.taxRate.
        */
+
       const taxPercent =
         row.hasTaxPercent
           ? row.taxPercent
@@ -1159,7 +1388,9 @@ export const salesOrderImportService = {
             );
 
       row.taxPercent =
-        Number.isFinite(taxPercent)
+        Number.isFinite(
+          taxPercent,
+        )
           ? taxPercent
           : 0;
 
@@ -1218,8 +1449,7 @@ export const salesOrderImportService = {
           paymentMethod:
             row.paymentMethod,
 
-          notes:
-            "",
+          notes: "",
 
           items: [],
 
@@ -1315,11 +1545,13 @@ export const salesOrderImportService = {
 
       if (
         row.notes &&
-        row.notes !== group.notes
+        row.notes !==
+          group.notes
       ) {
-        group.notes = group.notes
-          ? `${group.notes}; ${row.notes}`
-          : row.notes;
+        group.notes =
+          group.notes
+            ? `${group.notes}; ${row.notes}`
+            : row.notes;
       }
 
       group.totalQty +=
@@ -1362,6 +1594,7 @@ export const salesOrderImportService = {
     /*
      * Add row-level errors into the corresponding order.
      */
+
     for (const group of groupMap.values()) {
       for (const item of group.items) {
         for (const error of item.errors) {
@@ -1374,8 +1607,11 @@ export const salesOrderImportService = {
       /*
        * Remove duplicated messages while preserving order.
        */
+
       group.errors = [
-        ...new Set(group.errors),
+        ...new Set(
+          group.errors,
+        ),
       ];
     }
 
@@ -1385,8 +1621,8 @@ export const salesOrderImportService = {
   },
 
   buildOrderPayloads(
-      groups: SalesOrderImportGroup[],
-        createdBy: Types.ObjectId,
+    groups: SalesOrderImportGroup[],
+    createdBy: Types.ObjectId,
   ): SalesOrderImportOrderPayload[] {
     const payloads: SalesOrderImportOrderPayload[] =
       [];
@@ -1417,55 +1653,106 @@ export const salesOrderImportService = {
         continue;
       }
 
-      const items = validItems.map(
-        (item): SalesOrderImportItemPayload => ({
-            productId: item.productId!,
-            warehouseId: group.warehouseId!,
+      const items =
+        validItems.map(
+          (
+            item,
+          ): SalesOrderImportItemPayload => ({
+            productId:
+              item.productId!,
 
-            qty: item.qty!,
-            bonusQty: item.finalBonusQty,
+            warehouseId:
+              group.warehouseId!,
 
-            unitPrice: item.unitPrice,
+            qty:
+              item.qty!,
 
-            discountPercent: item.discountPercent,
-            discountAmount: item.discountAmount,
+            bonusQty:
+              item.finalBonusQty,
 
-            taxPercent: item.taxPercent,
-            taxAmount: item.taxAmount,
+            /*
+             * This is already the final effective price:
+             *
+             * Excel Price if provided,
+             * otherwise Product.salePrice.
+             */
+            unitPrice:
+              item.unitPrice,
 
-            lineSubtotal: item.grossAmount,
-            lineTotal: item.lineTotal,
+            discountPercent:
+              item.discountPercent,
 
-            productSku: item.productSku,
-            productName: item.productName || "",
-        }),
+            discountAmount:
+              item.discountAmount,
+
+            taxPercent:
+              item.taxPercent,
+
+            taxAmount:
+              item.taxAmount,
+
+            lineSubtotal:
+              item.grossAmount,
+
+            lineTotal:
+              item.lineTotal,
+
+            productSku:
+              item.productSku,
+
+            productName:
+              item.productName ||
+              "",
+          }),
         );
 
       payloads.push({
-        importReference: group.importReference,
+        importReference:
+          group.importReference,
 
-        customerId: group.dealerId,
-        warehouseId: group.warehouseId,
+        customerId:
+          group.dealerId,
 
-        orderDate: group.orderDate,
-        paymentMethod: group.paymentMethod,
+        warehouseId:
+          group.warehouseId,
+
+        orderDate:
+          group.orderDate,
+
+        paymentMethod:
+          group.paymentMethod,
 
         items,
 
-        subTotal: group.subtotal,
-        totalDiscount: group.discountAmount,
-        totalTax: group.taxAmount,
-        grandTotal: group.grandTotal,
+        subTotal:
+          group.subtotal,
 
-        totalBonusQty: items.reduce(
-            (sum, item) => sum + item.bonusQty,
+        totalDiscount:
+          group.discountAmount,
+
+        totalTax:
+          group.taxAmount,
+
+        grandTotal:
+          group.grandTotal,
+
+        totalBonusQty:
+          items.reduce(
+            (sum, item) =>
+              sum +
+              item.bonusQty,
             0,
-        ),
+          ),
 
         createdBy,
 
-        ...(group.notes ? { notes: group.notes } : {}),
-        });
+        ...(group.notes
+          ? {
+              notes:
+                group.notes,
+            }
+          : {}),
+      });
     }
 
     return payloads;
@@ -1482,22 +1769,31 @@ export const salesOrderImportService = {
     ) {
       return {
         rows: [],
+
         groups: [],
 
         totalRows: 0,
+
         validRows: 0,
+
         invalidRows: 0,
 
         totalOrders: 0,
+
         validOrders: 0,
+
         invalidOrders: 0,
 
         totalQty: 0,
+
         totalBonusQty: 0,
 
         subtotal: 0,
+
         discountAmount: 0,
+
         taxAmount: 0,
+
         grandTotal: 0,
 
         errors:
@@ -1558,10 +1854,15 @@ export const salesOrderImportService = {
       );
 
     let totalQty = 0;
+
     let totalBonusQty = 0;
+
     let subtotal = 0;
+
     let discountAmount = 0;
+
     let taxAmount = 0;
+
     let grandTotal = 0;
 
     for (const row of rows) {
@@ -1613,6 +1914,7 @@ export const salesOrderImportService = {
 
     return {
       rows,
+
       groups,
 
       totalRows:

@@ -1,8 +1,11 @@
 import { Router } from "express";
 import { dealerController } from "../controllers/dealer.controller";
 import { createCrudRouter } from "./crud.routes";
+import dealerImportRouter from "../modules/dealer/dealer-import.routes";
 
 const router = Router();
+
+router.use("/import", dealerImportRouter);
 
 /* =====================================================
    1️⃣ Generate Dealer Code
