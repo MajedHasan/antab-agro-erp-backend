@@ -33,6 +33,7 @@ type ProductAllocation = {
   productId: string;
   quantityProduced: number;
   expectedRawUsed: number;
+  actualRawUsed: number;
   rawMaterialCost: number;
   packagingMaterialCost: number;
   otherMaterialCost: number;
@@ -347,6 +348,247 @@ function allocatePoolCostToProducts(
   return allocations;
 }
 
+
+// --------- Inventory cost estimator ----------
+async function estimateInventoryCost(
+  itemType: string,
+  itemId: string,
+  locationId: string,
+  quantity: number,
+  session?: any,
+) {
+  const { StockTransaction } =
+    await import("../modules/stockTransaction/stockTransaction.model");
+
+  if (quantity <= 0) {
+    return { unitCost: 0, totalCost: 0 };
+  }
+
+  const batches = await StockTransaction.find({
+    itemType,
+    itemId,
+    locationId,
+    transactionType: {
+      $in: [
+        "purchase",
+        "production_return",
+        "transfer_in",
+        "production",
+        "return",
+      ],
+    },
+    $expr: {
+      $gt: [
+        { $subtract: ["$remainingQuantity", "$reserved"] },
+        0,
+      ],
+    },
+  })
+    .sort({ transactionDate: 1, _id: 1 })
+    .session(session ?? null)
+    .lean();
+
+  let remaining = quantity;
+  let totalCost = 0;
+
+  for (const batch of batches) {
+    const available =
+      Number(batch.remainingQuantity || 0) -
+      Number(batch.reserved || 0);
+
+    if (available <= 0) continue;
+
+    const taken = Math.min(remaining, available);
+    totalCost += taken * Number(batch.unitCost || 0);
+    remaining -= taken;
+
+    if (remaining <= 0) break;
+  }
+
+  if (remaining > 0) {
+    throw new Error(
+      `Insufficient available stock to estimate cost for ${itemType} ${itemId}. Missing quantity: ${remaining}`,
+    );
+  }
+
+  return {
+    unitCost: totalCost / quantity,
+    totalCost,
+  };
+}
+
+// ---------- Pending cost preview builder ----------
+async function buildPendingCostPreview(
+  session: mongoose.ClientSession,
+  wip: any,
+  draft: any,
+  actualUsed: number,
+) {
+  const perProductActual = allocateActualToProducts(
+    actualUsed,
+    draft.productDrafts.map((p: any) => p.expectedRawUsed),
+    draft.productAllowedWastage,
+  );
+
+  const products = new Map<string, ProductAllocation>();
+
+  draft.productDrafts.forEach((p: any, index: number) => {
+    products.set(p.productId, {
+      productId: p.productId,
+      quantityProduced: p.quantityProduced,
+      expectedRawUsed: p.expectedRawUsed,
+      actualRawUsed: perProductActual[index],
+      rawMaterialCost: 0,
+      packagingMaterialCost: 0,
+      otherMaterialCost: 0,
+      totalCost: 0,
+      unitCost: 0,
+    });
+  });
+
+  // Use the WIP's original total cost and quantity.
+  // Do not use the rounded wip.unitCost for valuation.
+  const initialQuantity = num(wip.initialQuantity);
+  if (initialQuantity <= 0) {
+    throw new Error("Invalid initial WIP quantity");
+  }
+
+  const mainConsumedCost = round2(
+    actualUsed * (num(wip.startCost) / initialQuantity),
+  );
+
+  const mainPool = draft.materialPools.find(
+    (p: MaterialPool) =>
+      p.itemType === "RawMaterial" &&
+      p.itemId === String(wip.rawMaterialId),
+  );
+
+  const pools: Array<{
+    itemType: "RawMaterial" | "PackagingItem";
+    itemId: string;
+    unit: string;
+    expectedByProduct: Record<string, number>;
+    actualCost: number;
+  }> = [];
+
+  pools.push({
+    itemType: "RawMaterial",
+    itemId: String(wip.rawMaterialId),
+    unit: wip.unit,
+    expectedByProduct: mainPool?.expectedByProduct || {},
+    actualCost: mainConsumedCost,
+  });
+
+  for (const om of draft.otherMaterialsUsed) {
+    const isRaw = om.itemType === "RawMaterial";
+    const StockModel = isRaw ? RawMaterialStock : PackagingStock;
+    const idField = isRaw ? "rawMaterialId" : "packagingItemId";
+
+    const stock = await StockModel.findOne({
+      [idField]: om.itemId,
+      factoryId: wip.factoryId,
+    })
+      .session(session)
+      .lean();
+
+    if (!stock) {
+      throw new Error(
+        `Stock record not found for ${om.itemType} ${om.itemId}`,
+      );
+    }
+
+    const stockUnit = String(stock.unit || om.unit || "").trim();
+    const requestedUnit = String(om.unit || stockUnit).trim();
+
+    const inventoryQty =
+      stockUnit &&
+      requestedUnit &&
+      stockUnit.toUpperCase() !== requestedUnit.toUpperCase()
+        ? convertUnit(om.quantity, requestedUnit, stockUnit)
+        : om.quantity;
+
+    const cost = await estimateInventoryCost(
+      om.itemType,
+      String(om.itemId),
+      String(wip.factoryId),
+      inventoryQty,
+      session,
+    );
+
+    const materialPool = draft.materialPools.find(
+      (p: MaterialPool) =>
+        p.itemType === om.itemType &&
+        p.itemId === String(om.itemId),
+    );
+
+    pools.push({
+      itemType: om.itemType,
+      itemId: String(om.itemId),
+      unit: stockUnit,
+      expectedByProduct: materialPool?.expectedByProduct || {},
+      actualCost: round2(cost.totalCost),
+    });
+  }
+
+  for (const pool of pools) {
+    const allocations = allocatePoolCostToProducts(
+      {
+        itemType: pool.itemType,
+        itemId: pool.itemId,
+        unit: pool.unit,
+        expectedQty: 0,
+        expectedByProduct: pool.expectedByProduct,
+      },
+      pool.actualCost,
+      draft.productDrafts,
+    );
+
+    for (const [productId, cost] of allocations) {
+      const product = products.get(productId);
+      if (!product) continue;
+
+      if (
+        pool.itemType === "PackagingItem"
+      ) {
+        product.packagingMaterialCost = round2(
+          product.packagingMaterialCost + cost,
+        );
+      } else {
+        product.rawMaterialCost = round2(
+          product.rawMaterialCost + cost,
+        );
+      }
+
+      product.totalCost = round2(product.totalCost + cost);
+    }
+  }
+
+  for (const product of products.values()) {
+    product.unitCost =
+      product.quantityProduced > 0
+        ? round2(product.totalCost / product.quantityProduced)
+        : 0;
+  }
+
+  const productAllocations = Array.from(products.values());
+
+  return {
+    products: productAllocations,
+    pools,
+    mainConsumedCost,
+    totalRawMaterialCost: round2(
+      pools
+        .filter((p) => p.itemType === "RawMaterial")
+        .reduce((sum, p) => sum + p.actualCost, 0),
+    ),
+    totalPackagingMaterialCost: round2(
+      pools
+        .filter((p) => p.itemType === "PackagingItem")
+        .reduce((sum, p) => sum + p.actualCost, 0),
+    ),
+  };
+}
+
 // =====================================================
 //                   MAIN SERVICE
 // =====================================================
@@ -587,29 +829,44 @@ export const materialWipService = {
         draft.productAllowedWastage,
       );
 
-      const pendingProducts = draft.productDrafts.map((pd, i) => ({
-        productId: pd.productId,
-        quantityProduced: pd.quantityProduced,
-        expectedRawUsed: pd.expectedRawUsed,
-        actualRawUsed: perProductActual[i],
-        rawMaterialCost: round2(perProductActual[i] * wip.unitCost),
-        packagingMaterialCost: 0,
-        otherMaterialCost: 0,
-        totalCost: round2(perProductActual[i] * wip.unitCost),
-        unitCost:
-          pd.quantityProduced > 0
-            ? round2((perProductActual[i] * wip.unitCost) / pd.quantityProduced)
-            : 0,
+
+      const preview = await buildPendingCostPreview(
+        session,
+        wip,
+        draft,
+        actualUsed,
+      );
+
+      const pendingProducts = preview.products.map((p) => ({
+        productId: p.productId,
+        quantityProduced: p.quantityProduced,
+        expectedRawUsed: p.expectedRawUsed,
+        actualRawUsed: p.actualRawUsed,
+        rawMaterialCost: p.rawMaterialCost,
+        packagingMaterialCost: p.packagingMaterialCost,
+        otherMaterialCost: p.otherMaterialCost,
+        totalCost: p.totalCost,
+        unitCost: p.unitCost,
       }));
 
-      const otherMaterials = draft.otherMaterialsUsed.map((o) => ({
-        itemType: o.itemType,
-        itemId: o.itemId,
-        quantity: o.quantity,
-        unit: o.unit,
-        unitCost: 0,
-        totalCost: 0,
-      }));
+      const otherMaterials = draft.otherMaterialsUsed.map((o) => {
+        const pool = preview.pools.find(
+          (p) =>
+            p.itemType === o.itemType &&
+            p.itemId === String(o.itemId),
+        );
+
+        const totalCost = pool?.actualCost ?? 0;
+
+        return {
+          itemType: o.itemType,
+          itemId: o.itemId,
+          quantity: o.quantity,
+          unit: o.unit,
+          unitCost: o.quantity > 0 ? round2(totalCost / o.quantity) : 0,
+          totalCost,
+        };
+      });
 
       wip.set("pendingConversion", {
         products: pendingProducts,
@@ -620,15 +877,64 @@ export const materialWipService = {
         gainQuantity: variance.gainQuantity,
         normalWastageQuantity: variance.normalWastageQuantity,
         productionLossQuantity: variance.productionLossQuantity,
-        rawMaterialCost: round2(actualUsed * wip.unitCost),
-        packagingMaterialCost: 0,
+        rawMaterialCost: preview.totalRawMaterialCost,
+        packagingMaterialCost: preview.totalPackagingMaterialCost,
         otherMaterialCost: 0,
-        totalInputCost: round2(actualUsed * wip.unitCost),
-        totalFinishedGoodsCost: pendingProducts.reduce((s, p) => s + p.totalCost, 0),
+        totalInputCost: round2(
+          preview.totalRawMaterialCost +
+          preview.totalPackagingMaterialCost,
+        ),
+        totalFinishedGoodsCost: round2(
+          pendingProducts.reduce((sum, p) => sum + p.totalCost, 0),
+        ),
         otherMaterialsUsed: otherMaterials,
         notes: "Pending approval",
         createdBy: userId,
       });
+
+
+      // const pendingProducts = draft.productDrafts.map((pd, i) => ({
+      //   productId: pd.productId,
+      //   quantityProduced: pd.quantityProduced,
+      //   expectedRawUsed: pd.expectedRawUsed,
+      //   actualRawUsed: perProductActual[i],
+      //   rawMaterialCost: round2(perProductActual[i] * wip.unitCost),
+      //   packagingMaterialCost: 0,
+      //   otherMaterialCost: 0,
+      //   totalCost: round2(perProductActual[i] * wip.unitCost),
+      //   unitCost:
+      //     pd.quantityProduced > 0
+      //       ? round2((perProductActual[i] * wip.unitCost) / pd.quantityProduced)
+      //       : 0,
+      // }));
+
+      // const otherMaterials = draft.otherMaterialsUsed.map((o) => ({
+      //   itemType: o.itemType,
+      //   itemId: o.itemId,
+      //   quantity: o.quantity,
+      //   unit: o.unit,
+      //   unitCost: 0,
+      //   totalCost: 0,
+      // }));
+
+      // wip.set("pendingConversion", {
+      //   products: pendingProducts,
+      //   remainingRawQuantity: remaining,
+      //   expectedRawUsed: draft.expectedRawUsed,
+      //   allowedWastageRawUsed: draft.allowedWastageRawUsed,
+      //   actualRawUsed: round3(actualUsed),
+      //   gainQuantity: variance.gainQuantity,
+      //   normalWastageQuantity: variance.normalWastageQuantity,
+      //   productionLossQuantity: variance.productionLossQuantity,
+      //   rawMaterialCost: round2(actualUsed * wip.unitCost),
+      //   packagingMaterialCost: 0,
+      //   otherMaterialCost: 0,
+      //   totalInputCost: round2(actualUsed * wip.unitCost),
+      //   totalFinishedGoodsCost: pendingProducts.reduce((s, p) => s + p.totalCost, 0),
+      //   otherMaterialsUsed: otherMaterials,
+      //   notes: "Pending approval",
+      //   createdBy: userId,
+      // });
 
       wip.status = "PENDING_APPROVAL";
       wip.remainingQuantity = round3(remaining);
@@ -707,29 +1013,73 @@ export const materialWipService = {
         draft.productAllowedWastage,
       );
 
-      const newPendingProducts = draft.productDrafts.map((pd, i) => ({
-        productId: pd.productId,
-        quantityProduced: pd.quantityProduced,
-        expectedRawUsed: pd.expectedRawUsed,
-        actualRawUsed: perProductActual[i],
-        rawMaterialCost: round2(perProductActual[i] * wip.unitCost),
-        packagingMaterialCost: 0,
-        otherMaterialCost: 0,
-        totalCost: round2(perProductActual[i] * wip.unitCost),
-        unitCost:
-          pd.quantityProduced > 0
-            ? round2((perProductActual[i] * wip.unitCost) / pd.quantityProduced)
-            : 0,
+
+      if (actualUsed <= 0) {
+        throw new Error("No material consumed");
+      }
+
+      const preview = await buildPendingCostPreview(
+        session,
+        wip,
+        draft,
+        actualUsed,
+      );
+
+      const newPendingProducts = preview.products.map((p) => ({
+        productId: p.productId,
+        quantityProduced: p.quantityProduced,
+        expectedRawUsed: p.expectedRawUsed,
+        actualRawUsed: p.actualRawUsed,
+        rawMaterialCost: p.rawMaterialCost,
+        packagingMaterialCost: p.packagingMaterialCost,
+        otherMaterialCost: p.otherMaterialCost,
+        totalCost: p.totalCost,
+        unitCost: p.unitCost,
       }));
 
-      const otherMaterials = draft.otherMaterialsUsed.map((o) => ({
-        itemType: o.itemType,
-        itemId: o.itemId,
-        quantity: o.quantity,
-        unit: o.unit,
-        unitCost: 0,
-        totalCost: 0,
-      }));
+      const otherMaterials = draft.otherMaterialsUsed.map((o) => {
+        const pool = preview.pools.find(
+          (p) =>
+            p.itemType === o.itemType &&
+            p.itemId === String(o.itemId),
+        );
+
+        const totalCost = pool?.actualCost ?? 0;
+
+        return {
+          itemType: o.itemType,
+          itemId: o.itemId,
+          quantity: o.quantity,
+          unit: o.unit,
+          unitCost: o.quantity > 0 ? round2(totalCost / o.quantity) : 0,
+          totalCost,
+        };
+      });
+
+
+      // const newPendingProducts = draft.productDrafts.map((pd, i) => ({
+      //   productId: pd.productId,
+      //   quantityProduced: pd.quantityProduced,
+      //   expectedRawUsed: pd.expectedRawUsed,
+      //   actualRawUsed: perProductActual[i],
+      //   rawMaterialCost: round2(perProductActual[i] * wip.unitCost),
+      //   packagingMaterialCost: 0,
+      //   otherMaterialCost: 0,
+      //   totalCost: round2(perProductActual[i] * wip.unitCost),
+      //   unitCost:
+      //     pd.quantityProduced > 0
+      //       ? round2((perProductActual[i] * wip.unitCost) / pd.quantityProduced)
+      //       : 0,
+      // }));
+
+      // const otherMaterials = draft.otherMaterialsUsed.map((o) => ({
+      //   itemType: o.itemType,
+      //   itemId: o.itemId,
+      //   quantity: o.quantity,
+      //   unit: o.unit,
+      //   unitCost: 0,
+      //   totalCost: 0,
+      // }));
 
       wip.set("pendingConversion", {
         products: newPendingProducts,
@@ -740,11 +1090,20 @@ export const materialWipService = {
         gainQuantity: variance.gainQuantity,
         normalWastageQuantity: variance.normalWastageQuantity,
         productionLossQuantity: variance.productionLossQuantity,
-        rawMaterialCost: round2(actualUsed * wip.unitCost),
-        packagingMaterialCost: 0,
+        // rawMaterialCost: round2(actualUsed * wip.unitCost),
+        rawMaterialCost: preview.totalRawMaterialCost,
+        // packagingMaterialCost: 0,
+        packagingMaterialCost: preview.totalPackagingMaterialCost,
         otherMaterialCost: 0,
-        totalInputCost: round2(actualUsed * wip.unitCost),
-        totalFinishedGoodsCost: newPendingProducts.reduce((s, p) => s + p.totalCost, 0),
+        // totalInputCost: round2(actualUsed * wip.unitCost),
+        totalInputCost: round2(
+          preview.totalRawMaterialCost +
+          preview.totalPackagingMaterialCost,
+        ),
+        // totalFinishedGoodsCost: newPendingProducts.reduce((s, p) => s + p.totalCost, 0),
+        totalFinishedGoodsCost: round2(
+          newPendingProducts.reduce((sum, p) => sum + p.totalCost, 0),
+        ),
         otherMaterialsUsed: otherMaterials,
         notes: notes || wip.pendingConversion?.notes || "",
         createdBy: wip.pendingConversion?.createdBy || userId,
