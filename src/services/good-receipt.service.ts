@@ -757,7 +757,60 @@ export const grService = {
 
       // ── Work Order progress update (unchanged) ──
       if (gr.workOrderId) {
-        // ... keep existing code
+        const WorkOrderModel = (await import("../models/workorder.model"))
+          .default;
+        const workOrderId = gr.workOrderId?._id || gr.workOrderId;
+
+        const workOrder =
+          await WorkOrderModel.findById(workOrderId).session(session);
+
+        if (!workOrder) throw new Error("Work Order not found");
+
+        const allGRs = await base.model
+          .find({ workOrderId, status: { $ne: "Rejected" } })
+          .session(session)
+          .lean();
+
+        const combinedGRs = [...allGRs];
+        if (!combinedGRs.find((g) => String(g._id) === String(gr._id))) {
+          combinedGRs.push({ ...gr.toObject(), status: "Approved" });
+        }
+
+        const receivedMap: Record<string, number> = {};
+        for (const g of combinedGRs) {
+          for (const it of g.items || []) {
+            const key = String(it.workOrderItemId || it.itemId);
+            receivedMap[key] =
+              (receivedMap[key] || 0) + Number(it.receivedQty || 0);
+          }
+        }
+
+        let totalOrdered = 0;
+        let totalReceived = 0;
+
+        for (const woItem of workOrder.items || []) {
+          const ordered = Number(woItem.quantity || 0);
+          const received = receivedMap[String(woItem._id)] || 0;
+
+          woItem.receivedQty = received;
+          woItem.progress = ordered > 0 ? (received / ordered) * 100 : 0;
+
+          totalOrdered += ordered;
+          totalReceived += received;
+        }
+
+        workOrder.receivedQuantity = totalReceived;
+        workOrder.progress =
+          totalOrdered > 0 ? (totalReceived / totalOrdered) * 100 : 0;
+
+        workOrder.status =
+          totalOrdered > 0 && totalReceived >= totalOrdered
+            ? "Completed"
+            : totalReceived > 0
+              ? "Approved"
+              : workOrder.status;
+
+        await workOrder.save({ session });
       }
 
       gr.status = "Approved";
