@@ -18,6 +18,27 @@ function validateBalanced(lines: any[]) {
   }
 }
 
+/**
+ * Presents voucher lines in the standard accounting layout:
+ * all DEBIT lines first, then all CREDIT lines.
+ * Original insertion order is preserved within each group.
+ */
+function sortLinesForPresentation<
+  T extends { debit?: number; credit?: number },
+>(lines: T[]): T[] {
+  return lines
+    .map((ln, idx) => ({
+      ln,
+      idx,
+      isDebit: Number(ln.debit || 0) > 0,
+    }))
+    .sort((a, b) => {
+      if (a.isDebit !== b.isDebit) return a.isDebit ? -1 : 1;
+      return a.idx - b.idx;
+    })
+    .map((x) => x.ln);
+}
+
 /* ===========================
    Default populate (used locally)
    - keep this list in sync with your models
@@ -28,8 +49,7 @@ const DEFAULT_POPULATE = [
   { path: "approvedBy", select: "name email" },
   { path: "rejectedBy", select: "name email" },
   { path: "submittedBy", select: "name email" },
-  // optional related refs (if present on model)
-  { path: "source", select: "name code" }, // 👈 FIX
+  { path: "source", select: "name code" },
   { path: "mode" },
   { path: "invoiceId" },
   { path: "bankVaId", populate: { path: "accountId", select: "name code" } },
@@ -50,7 +70,6 @@ export const voucherService = {
 
   /* =======================================================
      CREATE (Always Pending) — validates balanced lines
-     Accepts optional metadata: source, mode, invoiceId, bankVaId, etc.
   ======================================================= */
   async create(payload: any) {
     const lines = payload.lines || [];
@@ -63,7 +82,7 @@ export const voucherService = {
         type: payload.type,
         reference: payload.reference,
         narration: payload.narration,
-        status: payload.status || "Pending", // always pending at creation
+        status: payload.status || "Pending",
         createdBy: payload.createdBy
           ? new Types.ObjectId(payload.createdBy)
           : undefined,
@@ -71,11 +90,10 @@ export const voucherService = {
           ? new Types.ObjectId(payload.createdBy)
           : undefined,
         submittedAt: new Date(),
-        // optional metadata fields — include if provided
         ...(payload.source
           ? {
               source: new Types.ObjectId(payload.source),
-              sourceModel: payload.sourceModel, // 👈 REQUIRED
+              sourceModel: payload.sourceModel,
             }
           : {}),
         ...(payload.mode ? { mode: payload.mode } : {}),
@@ -102,7 +120,7 @@ export const voucherService = {
       });
 
       const vobj: any = voucher.toObject();
-      vobj.lines = insertedLines;
+      vobj.lines = sortLinesForPresentation(insertedLines);
 
       return vobj;
     });
@@ -110,7 +128,6 @@ export const voucherService = {
 
   /* =======================================================
      UPDATE (Allowed only if voucher is not Approved)
-     - You can update Pending or Rejected vouchers
   ======================================================= */
   async update(id: string, payload: any) {
     return base.withTransaction(async (session) => {
@@ -121,7 +138,6 @@ export const voucherService = {
         throw new Error("Approved vouchers cannot be modified");
       }
 
-      // apply basic fields (keep metadata)
       voucher.date = payload.date ?? voucher.date;
       voucher.type = payload.type ?? voucher.type;
       voucher.reference = payload.reference ?? voucher.reference;
@@ -130,10 +146,9 @@ export const voucherService = {
         ? new Types.ObjectId(payload.updatedBy)
         : voucher.updatedBy;
 
-      // optional metadata fields
       if (payload.source !== undefined) {
         voucher.source = new Types.ObjectId(payload.source);
-        voucher.sourceModel = payload.sourceModel; // 👈 REQUIRED
+        voucher.sourceModel = payload.sourceModel;
       }
       if (payload.mode !== undefined) voucher.mode = payload.mode;
       if (payload.invoiceId !== undefined)
@@ -185,7 +200,7 @@ export const voucherService = {
   },
 
   /* =======================================================
-     GET BY ID (with lines)
+     GET BY ID (with lines) — ⭐ lines sorted debit→credit
   ======================================================= */
   async getById(id: string) {
     const v = await base.model
@@ -198,12 +213,11 @@ export const voucherService = {
       .populate("accountId")
       .lean();
 
-    return { ...v, lines };
+    return { ...v, lines: sortLinesForPresentation(lines) };
   },
 
   /* =======================================================
-     LIST (paginated) — returns vouchers with their lines
-     Note: Uses DEFAULT_POPULATE for related refs
+     LIST (paginated) — ⭐ lines sorted debit→credit
   ======================================================= */
   async list({
     filter = {},
@@ -230,7 +244,6 @@ export const voucherService = {
 
     const skip = (page - 1) * limit;
 
-    // find vouchers (populate key refs)
     const [vouchers, total] = await Promise.all([
       base.model
         .find(query)
@@ -262,7 +275,7 @@ export const voucherService = {
     return {
       data: vouchers.map((v: any) => ({
         ...v,
-        lines: grouped[String(v._id)] || [],
+        lines: sortLinesForPresentation(grouped[String(v._id)] || []),
       })),
       total,
       page,
@@ -272,14 +285,11 @@ export const voucherService = {
 
   /* =======================================================
      WORKFLOW
-     - approve: Pending -> Approved (and apply invoice payment if invoiceId present)
-     - reject: Pending -> Rejected
+     - approve: Pending → Approved (+ apply invoice payment)
+     - reject: Pending → Rejected
   ======================================================= */
-
-  /* Pending -> Approved */
   async approve(id: string, userId: string) {
     return base.withTransaction(async (session) => {
-      // ✅ 1. Find voucher first
       const voucher = await base.model
         .findOne({ _id: id, status: "Pending" })
         .populate("mode")
@@ -289,7 +299,6 @@ export const voucherService = {
         throw new Error("Voucher not found or not in Pending state");
       }
 
-      // ✅ 2. Get voucher lines
       const lines = await VoucherLine.find({ voucherId: id }).session(session);
 
       const totalCredit = lines.reduce(
@@ -297,7 +306,6 @@ export const voucherService = {
         0,
       );
 
-      // ✅ 3. Update invoice FIRST (if linked)
       if (voucher.invoiceId && totalCredit > 0) {
         const invoice = await salesInvoiceModel
           .findById(voucher.invoiceId)
@@ -314,7 +322,7 @@ export const voucherService = {
             ? String((voucher.mode as any).name).toUpperCase()
             : typeof voucher.mode === "string"
               ? voucher.mode.toUpperCase()
-              : "UNKNOWN"; // 👈 guarantee value
+              : "UNKNOWN";
 
         invoice.payments.push({
           amount: totalCredit,
@@ -338,7 +346,6 @@ export const voucherService = {
         await invoice.save({ session });
       }
 
-      // ✅ 4. NOW approve the voucher AFTER invoice success
       voucher.status = "Approved";
       voucher.approvedBy = userId ? new Types.ObjectId(userId) : undefined;
       voucher.approvedAt = new Date();
@@ -349,7 +356,6 @@ export const voucherService = {
     });
   },
 
-  /* Pending -> Rejected */
   async reject(id: string, userId: string, reason: string) {
     if (!reason) {
       throw new Error("Rejection reason is required");

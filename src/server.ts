@@ -16,11 +16,11 @@ async function bootstrap() {
     logger.info("Connected to MongoDB");
 
      // RBAC must be seeded in this order.
-    await seedPermissions();
-    await seedRoles();
-    await chartOfAccountsSeed();
-    await seedGeography();
-    await seedUsers();
+    // await seedPermissions();
+    // await seedRoles();
+    // await chartOfAccountsSeed();
+    // await seedGeography();
+    // await seedUsers();
 
     const server = app.listen(port, () => {
       logger.info(`Server listening on port ${port}`);

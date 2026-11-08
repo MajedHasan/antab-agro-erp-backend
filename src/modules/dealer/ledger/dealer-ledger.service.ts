@@ -1,23 +1,33 @@
 // src/modules/dealer/ledger/dealer-ledger.service.ts
 import Dealer from "../../../models/dealer.model";
 import SalesOrder from "../../../models/sales-order.model";
-import SalesInvoice from "../../../models/sales-invoice.model";
 import SalesReturn from "../../../models/sales-return.model";
 import Collection from "../../collection/collection.model";
 
-// ---------- Types ----------
+/* --------------------------- Types --------------------------- */
+type EntryType = "SALE" | "PAYMENT" | "RETURN";
+type CommissionCalcMode = "PERCENT" | "FLAT" | "NONE";
+type CommissionDirection = "ADD" | "DEDUCT";
+
 type LedgerEntry = {
   id: string;
   date: Date;
-  type: "SALE" | "PAYMENT" | "RETURN";
-  reference: string;          // orderNo / mrNo / returnNo
-  details: any;               // full document or summary
-  debit: number;              // increase in due (sale)
-  credit: number;             // decrease in due (payment/return)
-  balance: number;            // running dealer due
+  type: EntryType;
+  reference: string;
+  details: Record<string, any>;
+  debit: number;
+  credit: number;
+  grossCredit?: number;
+  commission?: number;
+  commissionCredited?: number;
+  commissionDirection?: CommissionDirection;
+  commissionCalcMode?: CommissionCalcMode;
+  commissionRate?: number;
+  commissionSource?: string;
+  balance: number;
 };
 
-type DealerLedger = {
+export type DealerLedgerResult = {
   dealer: {
     id: string;
     name: string;
@@ -30,29 +40,146 @@ type DealerLedger = {
   summary: {
     openingBalance: number;
     totalSales: number;
-    totalPayments: number;
+    totalPayments: number;         // CASH only
+    totalCommission: number;
+    totalCommissionEffect: number; // signed
+    totalCredited: number;         // payments + commission effect
     totalReturns: number;
     closingBalance: number;
+    storedDue: number;
+    dueMismatch: number;
   };
   pagination: {
     page: number;
     limit: number;
     total: number;
     totalPages: number;
+    hasPrev: boolean;
+    hasNext: boolean;
   };
 };
 
 type LedgerOptions = {
   startDate?: string;
   endDate?: string;
-  type?: "SALE" | "PAYMENT" | "RETURN" | "ALL";
+  type?: EntryType | "ALL";
   page?: number;
   limit?: number;
 };
 
-// ---------- Helpers ----------
-function round2(n: number) {
-  return Math.round((n || 0) * 100) / 100;
+/* --------------------------- Helpers --------------------------- */
+const round2 = (n: number) => Math.round((n || 0) * 100) / 100;
+
+const startOfDay = (d: string | Date) => {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+};
+const endOfDay = (d: string | Date) => {
+  const x = new Date(d);
+  x.setHours(23, 59, 59, 999);
+  return x;
+};
+
+/**
+ * Handles your real commission shape:
+ *   commission: { mode: "PERCENT" | "FLAT", value: 10, amount: 3800 }
+ *   deductCommission: false → ADD (reduces due more)
+ *   deductCommission: true  → DEDUCT (subtracts from cash)
+ */
+function extractCommission(
+  mr: any,
+  taka: number,
+  inv: any = {},
+  col: any = {},
+): {
+  amount: number;
+  direction: CommissionDirection;
+  calcMode: CommissionCalcMode;
+  rate: number;
+  source: string;
+} {
+  let amount = 0;
+  let calcMode: CommissionCalcMode = "NONE";
+  let rate = 0;
+  let source = "none";
+
+  const candidates: Array<{ obj: any; label: string }> = [
+    { obj: mr?.commission, label: "mr.commission" },
+    { obj: mr?.comm, label: "mr.comm" },
+    { obj: mr?.commissionAmount, label: "mr.commissionAmount" },
+    { obj: mr?.commAmount, label: "mr.commAmount" },
+    { obj: inv?.commission, label: "inv.commission" },
+    { obj: col?.commission, label: "col.commission" },
+  ];
+
+  for (const { obj, label } of candidates) {
+    if (obj == null) continue;
+
+    if (typeof obj === "object") {
+      const rawMode = String(obj.mode || "").toUpperCase();
+      const val = Number(obj.value) || 0;
+      const amt = Number(obj.amount) || 0;
+
+      if ((rawMode === "PERCENT" || rawMode === "PERCENTAGE") && val > 0) {
+        calcMode = "PERCENT";
+        rate = val;
+        amount = amt > 0 ? amt : Math.round(taka * val) / 100;
+        source = `${label}.percent(${val}%)`;
+        break;
+      }
+      if ((rawMode === "FLAT" || rawMode === "FIXED") && val > 0) {
+        calcMode = "FLAT";
+        amount = amt > 0 ? amt : val;
+        source = `${label}.flat`;
+        break;
+      }
+      if (amt > 0) {
+        calcMode = "FLAT";
+        amount = amt;
+        source = `${label}.amount`;
+        break;
+      }
+      const alt =
+        Number(obj.commAmount) ||
+        Number(obj.commissionAmount) ||
+        Number(obj.amountValue) ||
+        0;
+      if (alt > 0) {
+        calcMode = "FLAT";
+        amount = alt;
+        source = `${label}.alt`;
+        break;
+      }
+    }
+
+    if (typeof obj === "number" && Number.isFinite(obj) && obj > 0) {
+      amount = obj;
+      calcMode = "FLAT";
+      source = `${label}(number)`;
+      break;
+    }
+    if (typeof obj === "string") {
+      const n = Number(obj);
+      if (Number.isFinite(n) && n > 0) {
+        amount = n;
+        calcMode = "FLAT";
+        source = `${label}(string)`;
+        break;
+      }
+    }
+  }
+
+  const isDeduct = mr?.deductCommission === true;
+  const direction: CommissionDirection = isDeduct ? "DEDUCT" : "ADD";
+
+  return {
+    amount: round2(amount),
+    direction,
+    calcMode,
+    rate,
+    source,
+  };
 }
 
 async function getDealer(dealerId: string) {
@@ -60,15 +187,16 @@ async function getDealer(dealerId: string) {
     .select("name phoneNumber creditLimit currentDue openingBalance")
     .lean();
   if (!dealer) throw new Error("Dealer not found");
-  return dealer;
+  return dealer as any;
 }
 
-// Fetch sales orders (only delivered)
-async function fetchSalesEntries(dealerId: string, startDate?: Date, endDate?: Date) {
-  const filter: any = {
-    customerId: dealerId,
-    status: "DELIVERED",
-  };
+/* --------------------------- Fetchers --------------------------- */
+async function fetchSalesEntries(
+  dealerId: string,
+  startDate?: Date,
+  endDate?: Date,
+): Promise<LedgerEntry[]> {
+  const filter: any = { customerId: dealerId, status: "DELIVERED" };
   if (startDate || endDate) {
     filter.orderDate = {};
     if (startDate) filter.orderDate.$gte = startDate;
@@ -76,44 +204,48 @@ async function fetchSalesEntries(dealerId: string, startDate?: Date, endDate?: D
   }
 
   const orders = await SalesOrder.find(filter)
-    .populate({
-      path: "items.productId",
-      select: "name sku unit",
-    })
+    .populate({ path: "items.productId", select: "name sku unit" })
     .populate("warehouseId", "name")
     .lean()
     .sort({ orderDate: 1 });
 
-  return orders.map((order: any) => ({
-    id: order._id.toString(),
+  return (orders as any[]).map((order) => ({
+    id: String(order._id),
     date: order.orderDate || order.createdAt,
     type: "SALE" as const,
-    reference: order.orderNo,
+    reference: order.orderNo || "—",
     details: {
       orderNo: order.orderNo,
+      orderDate: order.orderDate,
+      deliveredAt: order.deliveredAt || order.deliveryDate,
+      invoiceNo: order.invoiceNo,
       items: (order.items || []).map((item: any) => ({
-        productId: item.productId?._id || item.productId,
         productName: item.productId?.name || "Product",
+        sku: item.productId?.sku,
+        unit: item.productId?.unit,
         qty: item.qty,
         bonusQty: item.bonusQty,
         unitPrice: item.unitPrice,
         lineTotal: item.lineTotal,
       })),
       subTotal: order.subTotal,
+      discount: order.discount,
+      tax: order.tax,
       grandTotal: order.grandTotal,
       warehouse: order.warehouseId?.name,
+      remarks: order.remarks,
     },
-    debit: order.grandTotal,    // sale increases due
+    debit: round2(Number(order.grandTotal) || 0),
     credit: 0,
   }));
 }
 
-// Fetch collections (payment entries)
-async function fetchPaymentEntries(dealerId: string, startDate?: Date, endDate?: Date) {
-  const filter: any = {
-    "dealers.dealerId": dealerId,
-    status: "APPROVED",      // only approved collections
-  };
+async function fetchPaymentEntries(
+  dealerId: string,
+  startDate?: Date,
+  endDate?: Date,
+): Promise<LedgerEntry[]> {
+  const filter: any = { "dealers.dealerId": dealerId, status: "APPROVED" };
   if (startDate || endDate) {
     filter.date = {};
     if (startDate) filter.date.$gte = startDate;
@@ -125,149 +257,227 @@ async function fetchPaymentEntries(dealerId: string, startDate?: Date, endDate?:
     .lean()
     .sort({ date: 1 });
 
-  const entries: any[] = [];
-  for (const col of collections) {
-    const dealerBlock = col.dealers.find(
-      (d: any) => d.dealerId.toString() === dealerId
+  const out: LedgerEntry[] = [];
+
+  for (const col of collections as any[]) {
+    const block = (col.dealers || []).find(
+      (d: any) => String(d.dealerId) === String(dealerId),
     );
-    if (!dealerBlock) continue;
+    if (!block) continue;
 
-    for (const inv of dealerBlock.invoices) {
-      for (const mr of inv.moneyReceipts) {
-        // Each MR generates a ledger entry
-        const mrAmount = mr.taka;
-        const commission = mr.commission?.amount || 0;
-        const deduction = mr.deductCommission ? commission : 0;
-        const netPayment = mrAmount - deduction;   // this reduces due
+    for (const inv of block.invoices || []) {
+      for (const mr of inv.moneyReceipts || []) {
+        const taka = round2(Number(mr.taka) || 0);
+        const comm = extractCommission(mr, taka, inv, col);
 
-        entries.push({
-          id: `${col._id}_${mr.mrNo}`,
+        const effect = comm.direction === "ADD" ? comm.amount : -comm.amount;
+        const credit = round2(taka + effect);
+
+        out.push({
+          id: `${col._id}_${mr.mrNo || Math.random().toString(36).slice(2, 8)}`,
           date: mr.mrDate || col.date,
-          type: "PAYMENT" as const,
-          reference: mr.mrNo,
+          type: "PAYMENT",
+          reference: mr.mrNo || "MR",
           details: {
             mrNo: mr.mrNo,
-            invoiceNo: inv.invoiceNo || inv.invoiceId?.invoiceNo || "N/A",
-            taka: mrAmount,
-            commission,
-            deduction,
-            netPayment,
+            mrDate: mr.mrDate,
+            collectionDate: col.date,
+            collectionNo: col.collectionNo || col.voucherNo,
+            invoiceNo: inv.invoiceNo || inv.invoiceId?.invoiceNo || "—",
+            taka,
+            commission: comm.amount,
+            commissionDirection: comm.direction,
+            commissionCalcMode: comm.calcMode,
+            commissionRate: comm.rate,
+            commissionSource: comm.source,
+            commissionCredited: comm.direction === "ADD" ? comm.amount : 0,
+            commissionEffect: effect,
+            totalCredit: credit,
+            deductCommissionFlag: mr?.deductCommission,
+            commissionRaw: mr?.commission,
+            paymentMode: mr.paymentMode?.name || mr.paymentMode,
+            bank: mr.bank?.name || mr.bank,
+            chequeNo: mr.chequeNo,
             onlineCopyNo: col.onlineCopy?.onlineCopyNo,
+            mediaId: mr.mediaId,
+            remarks: mr.remarks || col.remarks,
           },
           debit: 0,
-          credit: netPayment,    // payment reduces due
+          credit,
+          grossCredit: taka,
+          commission: comm.amount,
+          commissionCredited: comm.direction === "ADD" ? comm.amount : 0,
+          commissionDirection: comm.direction,
+          commissionCalcMode: comm.calcMode,
+          commissionRate: comm.rate,
+          commissionSource: comm.source,
         });
       }
     }
   }
-  return entries;
+  return out;
 }
 
-// Fetch sales returns (completed)
-async function fetchReturnEntries(dealerId: string, startDate?: Date, endDate?: Date) {
-  const filter: any = {
-    customerId: dealerId,
-    status: "COMPLETED",
-  };
+async function fetchReturnEntries(
+  dealerId: string,
+  startDate?: Date,
+  endDate?: Date,
+): Promise<LedgerEntry[]> {
+  const filter: any = { customerId: dealerId, status: "COMPLETED" };
   if (startDate || endDate) {
-    filter.createdAt = {};
-    if (startDate) filter.createdAt.$gte = startDate;
-    if (endDate) filter.createdAt.$lte = endDate;
+    const dateCond: any = {};
+    if (startDate) dateCond.$gte = startDate;
+    if (endDate) dateCond.$lte = endDate;
+    filter.$or = [
+      { completedAt: dateCond },
+      { completedAt: null, createdAt: dateCond },
+    ];
   }
 
   const returns = await SalesReturn.find(filter)
-    .populate("invoiceReturns.items.productId", "name")
+    .populate("invoiceReturns.items.productId", "name sku unit")
+    .populate("invoiceReturns.invoiceId", "invoiceNo")
     .lean()
     .sort({ createdAt: 1 });
 
-  return returns.map((ret: any) => ({
-    id: ret._id.toString(),
+  return (returns as any[]).map((ret) => ({
+    id: String(ret._id),
     date: ret.completedAt || ret.createdAt,
     type: "RETURN" as const,
-    reference: ret.returnNo,
+    reference: ret.returnNo || "—",
     details: {
       returnNo: ret.returnNo,
-      items: ret.invoiceReturns.flatMap((block: any) =>
-        block.items.map((item: any) => ({
-          productId: item.productId?._id || item.productId,
+      createdAt: ret.createdAt,
+      completedAt: ret.completedAt,
+      reason: ret.reason,
+      invoiceNos: (ret.invoiceReturns || [])
+        .map((b: any) => b.invoiceNo || b.invoiceId?.invoiceNo)
+        .filter(Boolean),
+      items: (ret.invoiceReturns || []).flatMap((b: any) =>
+        (b.items || []).map((item: any) => ({
           productName: item.productId?.name || "Product",
-          qty: item.warehouseReceivedQty || item.finalApprovedQty,
+          sku: item.productId?.sku,
+          unit: item.productId?.unit,
+          qty:
+            item.warehouseReceivedQty ||
+            item.finalApprovedQty ||
+            item.qty,
           unitPrice: item.soldUnitPrice,
           returnAmount: item.finalReturnAmount,
-        }))
+        })),
       ),
-      totalReturnAmount: ret.totalReceivedAmount,
+      totalReturnAmount: round2(Number(ret.totalReceivedAmount) || 0),
     },
     debit: 0,
-    credit: ret.totalReceivedAmount,   // return reduces due
+    credit: round2(Number(ret.totalReceivedAmount) || 0),
   }));
 }
 
+/* --------------------------- Service --------------------------- */
 export const dealerLedgerService = {
-  async getLedger(dealerId: string, opts: LedgerOptions = {}): Promise<DealerLedger> {
-    const dealer = await getDealer(dealerId);
-    const startDate = opts.startDate ? new Date(opts.startDate) : undefined;
-    const endDate = opts.endDate ? new Date(opts.endDate) : undefined;
+  async getLedger(
+    dealerId: string,
+    opts: LedgerOptions = {},
+  ): Promise<DealerLedgerResult> {
+    if (!dealerId) throw new Error("dealerId is required");
 
-    // Fetch all entry types
+    const dealer = await getDealer(dealerId);
+    const startDate = opts.startDate ? startOfDay(opts.startDate) : undefined;
+    const endDate = opts.endDate ? endOfDay(opts.endDate) : undefined;
+
     const [sales, payments, returns] = await Promise.all([
       fetchSalesEntries(dealerId, startDate, endDate),
       fetchPaymentEntries(dealerId, startDate, endDate),
       fetchReturnEntries(dealerId, startDate, endDate),
     ]);
 
-    // Merge and sort by date (ascending)
-    let allEntries = [...sales, ...payments, ...returns].sort(
-      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+    const all: LedgerEntry[] = [...sales, ...payments, ...returns].sort(
+      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
     );
 
-    // Filter by type if specified
+    // Running balance over ALL entries (independent of type filter)
+    const openingBalance = round2(Number(dealer.openingBalance) || 0);
+    let running = openingBalance;
+    for (const e of all) {
+      running = round2(running + e.debit - e.credit);
+      e.balance = running;
+    }
+    const closingBalance = running;
+
+    // Summary
+    const totalSales = round2(sales.reduce((s, e) => s + e.debit, 0));
+    const totalReturns = round2(returns.reduce((s, e) => s + e.credit, 0));
+
+    // ⭐ Cash only (no commission)
+    const totalPayments = round2(
+      payments.reduce((s, e) => s + (e.grossCredit || 0), 0),
+    );
+
+    // ⭐ Total commission (unsigned)
+    const totalCommission = round2(
+      payments.reduce((s, e) => s + (e.commission || 0), 0),
+    );
+
+    // ⭐ Signed effect on due
+    const totalCommissionEffect = round2(
+      payments.reduce((s, e) => {
+        const dir = e.commissionDirection || "ADD";
+        return s + (dir === "ADD" ? e.commission || 0 : -(e.commission || 0));
+      }, 0),
+    );
+
+    // ⭐ Total credited = cash + commission effect (what actually reduces due)
+    const totalCredited = round2(totalPayments + totalCommissionEffect);
+
+    const storedDue = round2(Number(dealer.currentDue) || 0);
+
+    // Display filter
+    let display = all;
     if (opts.type && opts.type !== "ALL") {
-      allEntries = allEntries.filter(e => e.type === opts.type);
+      display = all.filter((e) => e.type === opts.type);
     }
 
-    // Compute running balance of dealer due
-    const openingBalance = Number(dealer.openingBalance) || 0;
-    let runningBalance = openingBalance;
-    allEntries.forEach(entry => {
-      runningBalance = round2(runningBalance + entry.debit - entry.credit);
-      entry.balance = runningBalance;
-    });
-
-    const totalSales = allEntries.filter(e => e.type === "SALE").reduce((s, e) => s + e.debit, 0);
-    const totalPayments = allEntries.filter(e => e.type === "PAYMENT").reduce((s, e) => s + e.credit, 0);
-    const totalReturns = allEntries.filter(e => e.type === "RETURN").reduce((s, e) => s + e.credit, 0);
-
     // Pagination
-    const page = opts.page || 1;
-    const limit = opts.limit || 50;
-    const total = allEntries.length;
-    const totalPages = Math.ceil(total / limit);
-    const startIdx = (page - 1) * limit;
-    const paginatedEntries = allEntries.slice(startIdx, startIdx + limit);
+    const page = Math.max(1, Math.floor(Number(opts.page) || 1));
+    const limit = Math.min(
+      500,
+      Math.max(1, Math.floor(Number(opts.limit) || 50)),
+    );
+    const total = display.length;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const safePage = Math.min(page, totalPages);
+    const startIdx = (safePage - 1) * limit;
+    const entries = display.slice(startIdx, startIdx + limit);
 
     return {
       dealer: {
-        id: dealer._id.toString(),
+        id: String(dealer._id),
         name: dealer.name,
         phone: dealer.phoneNumber || "",
-        creditLimit: dealer.creditLimit || 0,
-        currentDue: dealer.currentDue || 0,
+        creditLimit: Number(dealer.creditLimit) || 0,
+        currentDue: storedDue,
         openingBalance,
       },
-      entries: paginatedEntries,
+      entries,
       summary: {
         openingBalance,
         totalSales,
         totalPayments,
+        totalCommission,
+        totalCommissionEffect,
+        totalCredited,
         totalReturns,
-        closingBalance: runningBalance,
+        closingBalance,
+        storedDue,
+        dueMismatch: round2(closingBalance - storedDue),
       },
       pagination: {
-        page,
+        page: safePage,
         limit,
         total,
         totalPages,
+        hasPrev: safePage > 1,
+        hasNext: safePage < totalPages,
       },
     };
   },
@@ -275,5 +485,5 @@ export const dealerLedgerService = {
   async getLedgerSummary(dealerId: string) {
     const { summary } = await this.getLedger(dealerId, { limit: 1 });
     return summary;
-  }
+  },
 };

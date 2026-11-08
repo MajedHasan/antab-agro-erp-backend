@@ -1,17 +1,29 @@
-// src/controllers/dealer-ledger.controller.ts
+// src/modules/dealer/ledger/dealer-ledger.controller.ts
 import { Request, Response, NextFunction } from "express";
 import { dealerLedgerService } from "./dealer-ledger.service";
+
+const validTypes = ["SALE", "PAYMENT", "RETURN", "ALL"] as const;
+type ValidType = (typeof validTypes)[number];
 
 export const dealerLedgerController = {
   async ledger(req: Request, res: Response, next: NextFunction) {
     try {
       const { dealerId } = req.params;
-      const { startDate, endDate, type, page, limit } = req.query as any;
+      const { startDate, endDate, type, page, limit } = req.query as Record<
+        string,
+        string | undefined
+      >;
+
+      const safeType: ValidType =
+        typeof type === "string" &&
+        (validTypes as readonly string[]).includes(type)
+          ? (type as ValidType)
+          : "ALL";
 
       const data = await dealerLedgerService.getLedger(dealerId, {
         startDate,
         endDate,
-        type,
+        type: safeType,
         page: page ? Number(page) : undefined,
         limit: limit ? Number(limit) : undefined,
       });
