@@ -62,6 +62,7 @@ const base = createCrudService(SalesOrder, {
     "warehouseId",
     "paymentMethod",
     "createdBy",
+    "orderDate",
   ],
   defaultPopulate,
 });

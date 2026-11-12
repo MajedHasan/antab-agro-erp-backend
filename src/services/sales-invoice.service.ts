@@ -4,7 +4,7 @@ import { Types } from "mongoose";
 
 const base = createCrudService(SalesInvoice, {
   searchFields: ["invoiceNo"],
-  allowedFilterFields: ["customerId", "paymentStatus", "status"],
+  allowedFilterFields: ["customerId", "paymentStatus", "status",     "invoiceDate"],
   defaultPopulate: [
     { path: "customerId", select: "name phoneNumber currentDue" },
     { path: "orderId", select: "orderNo" },

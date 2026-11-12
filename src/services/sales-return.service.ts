@@ -46,7 +46,7 @@ const defaultPopulate = [
 
 const base = createCrudService(SalesReturn, {
   searchFields: ["returnNo"],
-  allowedFilterFields: ["status", "customerId", "returnNo"],
+  allowedFilterFields: ["status", "customerId", "returnNo", "createdAt"],
   defaultPopulate,
 });
 
@@ -646,7 +646,7 @@ async function getInventoryAccount(productName: string, session?: any) {
 
 async function getCOGSAccount(productName: string, session?: any) {
   return (accountService as any).getAccountByPath(
-    ["Expenses", "Cost of Goods Sold", "Sold Goods", productName],
+    ["Expense", "Cost of Goods Sold", "Sold Goods", productName],
     "Expense",
     { session },
   );
@@ -865,25 +865,47 @@ async function getReturnableQuantities(invoiceId: string, session?: any) {
   if (!invoice) throw new Error("Invoice not found");
 
   const usage = await getReturnUsageSnapshot([invoiceId], undefined, session);
-  const result: Array<{
+
+  const items: Array<{
     productId: string;
     soldQty: number;
     alreadyReturnedQty: number;
     remainingQty: number;
   }> = [];
+
   for (const invoiceItem of invoice.items || []) {
     const productId = String(invoiceItem.productId);
     const soldPieces = getSoldPieces(invoiceItem);
     const key = mkKey(invoiceId, productId);
     const usedQty = Number(usage.qtyByInvoiceProduct.get(key) || 0);
-    result.push({
+    items.push({
       productId,
       soldQty: soldPieces,
       alreadyReturnedQty: usedQty,
       remainingQty: Math.max(0, soldPieces - usedQty),
     });
   }
-  return result;
+
+  // ⭐ Invoice-level amount info (fixes "can return more than remains")
+  const grandTotal = Number(invoice.grandTotal || 0);
+  const paidAmount = Number(invoice.paidAmount || 0);
+  const balanceAmount = Number(invoice.balanceAmount || 0);
+  const alreadyReturnedAmount = round2(
+    Number(usage.amountByInvoice.get(invoiceId) || 0),
+  );
+  const remainingReturnableAmount = round2(
+    Math.max(0, balanceAmount - alreadyReturnedAmount),
+  );
+
+  return {
+    invoiceId,
+    grandTotal,
+    paidAmount,
+    balanceAmount,
+    alreadyReturnedAmount,
+    remainingReturnableAmount,
+    items,
+  };
 }
 
 // ===================== PUBLIC SERVICE =====================

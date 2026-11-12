@@ -3,6 +3,7 @@
 import { Request, Response, NextFunction } from "express";
 import { createCrudController } from "./crud.controller";
 import { salesReturnService } from "../services/sales-return.service";
+import { parseListQuery } from "../utils/query";
 
 function getUserId(req: Request): string | null {
   const user = (req as any).user;
@@ -11,6 +12,58 @@ function getUserId(req: Request): string | null {
 
 export const salesReturnController = {
   ...createCrudController(salesReturnService),
+
+    /* 🆕 LIST — with date range support */
+  list: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const pq = parseListQuery(req, { page: 1, limit: 15 });
+      const filter: any = { ...pq.filter };
+
+      const {
+        status,
+        customerId,
+        fromDate,
+        toDate,
+        q,
+      } = req.query as Record<string, string | undefined>;
+
+      if (status && status !== "ALL") filter.status = status;
+      if (customerId && customerId !== "ALL") filter.customerId = customerId;
+
+      // 🆕 translate fromDate/toDate → createdAt range (Asia/Dhaka)
+      if (fromDate || toDate) {
+        filter.createdAt = {};
+        if (fromDate) {
+          filter.createdAt.$gte = new Date(
+            `${String(fromDate)}T00:00:00.000+06:00`,
+          );
+        }
+        if (toDate) {
+          filter.createdAt.$lte = new Date(
+            `${String(toDate)}T23:59:59.999+06:00`,
+          );
+        }
+      }
+
+      delete filter.fromDate;
+      delete filter.toDate;
+
+      const result = await salesReturnService.list({
+        filter,
+        page: pq.page,
+        limit: pq.limit,
+        sort: pq.sort || "-createdAt",
+        select: pq.select,
+        populate: pq.populate,
+        q: pq.q ?? (typeof q === "string" ? q : undefined),
+      });
+
+      res.json({ success: true, ...result });
+      return;
+    } catch (err) {
+      next(err);
+    }
+  },
 
   /* ================================
      CREATE

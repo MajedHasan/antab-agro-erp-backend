@@ -3,9 +3,67 @@
 import { Request, Response, NextFunction } from "express";
 import { salesOrderService } from "../services/sales-order.service";
 import { createCrudController } from "./crud.controller";
+import { parseListQuery } from "../utils/query";
 
 export const salesOrderController = {
   ...createCrudController(salesOrderService),
+
+  /* ================================
+     LIST (with date range support)
+     GET /sales-orders?fromDate=YYYY-MM-DD&toDate=YYYY-MM-DD
+  ================================= */
+  list: async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const pq = parseListQuery(req, { page: 1, limit: 15 });
+      const filter: any = { ...pq.filter };
+
+      const {
+        status,
+        paymentMethod,
+        customerId,
+        warehouseId,
+        fromDate,
+        toDate,
+        q,
+      } = req.query as Record<string, string | undefined>;
+
+      // Explicitly (re)apply dimension filters — keeps behaviour
+      // independent of parseListQuery's internals.
+      if (status) filter.status = status;
+      if (paymentMethod) filter.paymentMethod = paymentMethod;
+      if (customerId) filter.customerId = customerId;
+      if (warehouseId) filter.warehouseId = warehouseId;
+
+      // 🆕 Translate fromDate/toDate → orderDate range
+      if (fromDate || toDate) {
+        filter.orderDate = {};
+        if (fromDate) {
+          filter.orderDate.$gte = new Date(
+            `${String(fromDate)}T00:00:00.000+06:00`,
+          );
+        }
+        if (toDate) {
+          filter.orderDate.$lte = new Date(
+            `${String(toDate)}T23:59:59.999+06:00`,
+          );
+        }
+      }
+
+      const result = await salesOrderService.list({
+        filter,
+        page: pq.page,
+        limit: pq.limit,
+        sort: pq.sort || "-createdAt",
+        select: pq.select,
+        populate: pq.populate,
+        q: pq.q ?? (typeof q === "string" ? q : undefined),
+      });
+
+      res.json({ success: true, ...result });
+    } catch (err) {
+      next(err);
+    }
+  },
 
   /* ================================
      CREATE
