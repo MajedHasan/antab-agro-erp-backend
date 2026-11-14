@@ -4,14 +4,21 @@ import { financialNoteController } from "../controllers/financial-note.controlle
 
 const router = Router();
 
-// Standard CRUD
+// Non-id routes first
 router.get("/", financialNoteController.list);
-router.get("/:id", financialNoteController.get);
-router.post("/", financialNoteController.create);
-router.put("/:id", financialNoteController.update);
-router.delete("/:id", financialNoteController.delete);
+router.get("/next-number", financialNoteController.getNextNumber);
+router.get("/account-tree", financialNoteController.getAccountTree);
+router.post("/preview-rollup", financialNoteController.previewRollup);
 
-// Additional workflow
+// CRUD
+router.post("/", financialNoteController.create);
+router.get("/:id", financialNoteController.get);
+router.put("/:id", financialNoteController.update);
+router.delete("/:id", financialNoteController.delete);   // ← was `remove`, now `delete`
+
+// Workflow
 router.post("/:id/finalise", financialNoteController.finalise);
+router.post("/:id/reopen", financialNoteController.reopen);
+router.post("/:id/move", financialNoteController.move);
 
 export default router;
