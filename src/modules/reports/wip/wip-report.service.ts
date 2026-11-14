@@ -128,21 +128,59 @@ async function resolvePackagingIdsByName(q: string) {
   return rows.map((r: any) => r._id);
 }
 
-// ---------- filter builder ----------
-function buildBaseMatch(filters: ReportFilters) {
+// ---------- filter builder (async — resolves q → IDs) ----------
+async function buildBaseMatch(filters: ReportFilters) {
   const match: any = {};
 
-  if (filters.factoryId) match.factoryId = filters.factoryId;
-  if (filters.rawMaterialId) match.rawMaterialId = filters.rawMaterialId;
+  // 🆕 aggregate() does NOT auto-cast strings → ObjectIds (find() does).
+  //    Without this, `rawMaterialId`, `factoryId`, `createdBy`, `approvedBy`
+  //    filters silently match nothing on every aggregate endpoint.
+  const toOid = (v?: string) => {
+    if (!v) return undefined;
+    return mongoose.Types.ObjectId.isValid(v)
+      ? new mongoose.Types.ObjectId(v)
+      : v;
+  };
+
+  if (filters.factoryId) match.factoryId = toOid(filters.factoryId);
+  if (filters.rawMaterialId) match.rawMaterialId = toOid(filters.rawMaterialId);
   if (filters.status) match.status = filters.status;
-  if (filters.createdBy) match.createdBy = filters.createdBy;
-  if (filters.approvedBy) match.approvedBy = filters.approvedBy;
+  if (filters.createdBy) match.createdBy = toOid(filters.createdBy);
+  if (filters.approvedBy) match.approvedBy = toOid(filters.approvedBy);
 
   const range = getDateRange(filters);
   if (range.from || range.to) {
     match.date = {};
     if (range.from) match.date.$gte = range.from;
     if (range.to) match.date.$lte = range.to;
+  }
+
+  // Global search — resolves name→ID for raw materials, products,
+  // and packaging so `q` works on every endpoint, not just `list`.
+  const q = filters.q?.trim();
+  if (q) {
+    const [rawIds, productIds, packIds] = await Promise.all([
+      resolveRawMaterialIdsByName(q),
+      resolveProductIdsByName(q),
+      resolvePackagingIdsByName(q),
+    ]);
+
+    const or: any[] = [];
+    if (rawIds.length) or.push({ rawMaterialId: { $in: rawIds } });
+    if (productIds.length) {
+      or.push({ "conversions.products.productId": { $in: productIds } });
+      or.push({ "pendingConversion.products.productId": { $in: productIds } });
+    }
+    if (packIds.length) {
+      or.push({ "conversions.otherMaterialsUsed.itemId": { $in: packIds } });
+      or.push({
+        "pendingConversion.otherMaterialsUsed.itemId": { $in: packIds },
+      });
+    }
+    if (mongoose.Types.ObjectId.isValid(q)) {
+      or.push({ _id: new mongoose.Types.ObjectId(q) });
+    }
+    if (or.length) match.$or = or;
   }
 
   return match;
@@ -154,36 +192,7 @@ export const materialWipReportService = {
    * Paginated WIP report list
    */
   async list(filters: ReportFilters) {
-    const match = buildBaseMatch(filters);
-    const q = filters.q?.trim();
-
-    if (q) {
-      const rawIds = await resolveRawMaterialIdsByName(q);
-      const productIds = await resolveProductIdsByName(q);
-
-      const or: any[] = [];
-
-      if (rawIds.length) {
-        or.push({ rawMaterialId: { $in: rawIds } });
-      }
-
-      if (productIds.length) {
-        or.push({ "conversions.products.productId": { $in: productIds } });
-        or.push({ "pendingConversion.products.productId": { $in: productIds } });
-      }
-
-      if (mongoose.Types.ObjectId.isValid(q)) {
-        or.push({ _id: q });
-      }
-
-      if (or.length) {
-        match.$or = or;
-      } else {
-        // fallback: search by raw material name
-        const rawIds2 = await resolveRawMaterialIdsByName(q);
-        match.rawMaterialId = { $in: rawIds2.length ? rawIds2 : ["000000000000000000000000"] };
-      }
-    }
+    const match = await buildBaseMatch(filters); // 👈 await
 
     const page = num(filters.page || 1);
     const limit = num(filters.limit || 15);
@@ -272,7 +281,7 @@ export const materialWipReportService = {
    * Overall WIP summary (dashboard cards)
    */
   async summary(filters: ReportFilters) {
-    const match = buildBaseMatch(filters);
+    const match = await buildBaseMatch(filters); // 👈 await
 
     const rows = await MaterialWIP.aggregate([
       { $match: match },
@@ -310,34 +319,36 @@ export const materialWipReportService = {
       },
     ]);
 
-    return rows[0] || {
-      totalRecords: 0,
-      totalIssuedQuantity: 0,
-      totalReturnedQuantity: 0,
-      totalConsumedQuantity: 0,
-      totalExpectedRawUsed: 0,
-      totalAllowedWastageRawUsed: 0,
-      totalActualRawUsed: 0,
-      totalGainQuantity: 0,
-      totalNormalWastageQuantity: 0,
-      totalProductionLossQuantity: 0,
-      totalRawMaterialCost: 0,
-      totalPackagingMaterialCost: 0,
-      totalOtherMaterialCost: 0,
-      totalInputCost: 0,
-      totalFinishedGoodsCost: 0,
-      activeCount: 0,
-      pendingCount: 0,
-      approvedCount: 0,
-      rejectedCount: 0,
-    };
+    return (
+      rows[0] || {
+        totalRecords: 0,
+        totalIssuedQuantity: 0,
+        totalReturnedQuantity: 0,
+        totalConsumedQuantity: 0,
+        totalExpectedRawUsed: 0,
+        totalAllowedWastageRawUsed: 0,
+        totalActualRawUsed: 0,
+        totalGainQuantity: 0,
+        totalNormalWastageQuantity: 0,
+        totalProductionLossQuantity: 0,
+        totalRawMaterialCost: 0,
+        totalPackagingMaterialCost: 0,
+        totalOtherMaterialCost: 0,
+        totalInputCost: 0,
+        totalFinishedGoodsCost: 0,
+        activeCount: 0,
+        pendingCount: 0,
+        approvedCount: 0,
+        rejectedCount: 0,
+      }
+    );
   },
 
   /**
    * Time‑series trend
    */
   async trend(filters: ReportFilters & { groupBy?: TrendGroupBy }) {
-    const match = buildBaseMatch(filters);
+    const match = await buildBaseMatch(filters); // 👈 await
     const groupBy = filters.groupBy || "day";
 
     let groupId: any;
@@ -378,19 +389,13 @@ export const materialWipReportService = {
         },
       };
     } else if (groupBy === "year") {
-      groupId = {
-        year: { $year: "$date" },
-      };
-      labelProject = {
-        label: { $toString: "$_id.year" },
-      };
+      groupId = { year: { $year: "$date" } };
+      labelProject = { label: { $toString: "$_id.year" } };
     } else {
       groupId = {
         day: { $dateToString: { format: "%Y-%m-%d", date: "$date" } },
       };
-      labelProject = {
-        label: "$_id.day",
-      };
+      labelProject = { label: "$_id.day" };
     }
 
     const rows = await MaterialWIP.aggregate([
@@ -449,10 +454,9 @@ export const materialWipReportService = {
    * Raw‑material‑wise report
    */
   async rawMaterialWise(filters: ReportFilters) {
-    const match = buildBaseMatch(filters);
-    if (filters.rawMaterialId) {
-      match.rawMaterialId = filters.rawMaterialId;
-    }
+    // buildBaseMatch already handles factoryId, rawMaterialId,
+    // status, date range, q — all properly cast.
+    const match = await buildBaseMatch(filters);
 
     const rows = await MaterialWIP.aggregate([
       { $match: match },
@@ -509,36 +513,115 @@ export const materialWipReportService = {
    * Finished‑product‑wise report
    */
   async productWise(filters: ReportFilters) {
-    const match = buildBaseMatch(filters);
-    const pipeline: any[] = [
+    const match = await buildBaseMatch(filters);
+
+    const productIdFilter =
+      filters.productId && mongoose.Types.ObjectId.isValid(filters.productId)
+        ? new mongoose.Types.ObjectId(filters.productId)
+        : null;
+
+    // ---- 1) Approved conversions ----
+    const approvedPipeline: any[] = [
       { $match: match },
       { $unwind: "$conversions" },
       { $unwind: "$conversions.products" },
     ];
-
-    if (filters.productId) {
-      pipeline.push({
-        $match: { "conversions.products.productId": new mongoose.Types.ObjectId(filters.productId) },
+    if (productIdFilter) {
+      approvedPipeline.push({
+        $match: { "conversions.products.productId": productIdFilter },
       });
     }
-
-    pipeline.push({
+    approvedPipeline.push({
       $group: {
         _id: "$conversions.products.productId",
         totalQtyProduced: { $sum: "$conversions.products.quantityProduced" },
         totalExpectedRawUsed: { $sum: "$conversions.products.expectedRawUsed" },
         totalRawMaterialCost: { $sum: "$conversions.products.rawMaterialCost" },
-        totalPackagingMaterialCost: { $sum: "$conversions.products.packagingMaterialCost" },
-        totalOtherMaterialCost: { $sum: "$conversions.products.otherMaterialCost" },
+        totalPackagingMaterialCost: {
+          $sum: "$conversions.products.packagingMaterialCost",
+        },
+        totalOtherMaterialCost: {
+          $sum: "$conversions.products.otherMaterialCost",
+        },
         totalCost: { $sum: "$conversions.products.totalCost" },
         wipCount: { $sum: 1 },
       },
     });
 
-    pipeline.push({ $sort: { totalQtyProduced: -1 } });
+    // ---- 2) Pending conversions ----
+    const pendingPipeline: any[] = [
+      { $match: match },
+      { $match: { "pendingConversion.products.0": { $exists: true } } },
+      { $unwind: "$pendingConversion.products" },
+    ];
+    if (productIdFilter) {
+      pendingPipeline.push({
+        $match: { "pendingConversion.products.productId": productIdFilter },
+      });
+    }
+    pendingPipeline.push({
+      $group: {
+        _id: "$pendingConversion.products.productId",
+        totalQtyProduced: {
+          $sum: "$pendingConversion.products.quantityProduced",
+        },
+        totalExpectedRawUsed: {
+          $sum: "$pendingConversion.products.expectedRawUsed",
+        },
+        totalRawMaterialCost: {
+          $sum: "$pendingConversion.products.rawMaterialCost",
+        },
+        totalPackagingMaterialCost: {
+          $sum: "$pendingConversion.products.packagingMaterialCost",
+        },
+        totalOtherMaterialCost: {
+          $sum: "$pendingConversion.products.otherMaterialCost",
+        },
+        totalCost: { $sum: "$pendingConversion.products.totalCost" },
+        wipCount: { $sum: 1 },
+      },
+    });
 
-    const rows = await MaterialWIP.aggregate(pipeline);
+    // ---- 3) Run both ----
+    const [approved, pending] = await Promise.all([
+      MaterialWIP.aggregate(approvedPipeline),
+      MaterialWIP.aggregate(pendingPipeline),
+    ]);
 
+    // ---- 4) Merge approved + pending by productId ----
+    const merged = new Map<string, any>();
+    for (const r of [...approved, ...pending]) {
+      if (!r._id) continue;
+      const key = String(r._id);
+      const existing = merged.get(key);
+      if (existing) {
+        existing.totalQtyProduced += r.totalQtyProduced || 0;
+        existing.totalExpectedRawUsed += r.totalExpectedRawUsed || 0;
+        existing.totalRawMaterialCost += r.totalRawMaterialCost || 0;
+        existing.totalPackagingMaterialCost +=
+          r.totalPackagingMaterialCost || 0;
+        existing.totalOtherMaterialCost += r.totalOtherMaterialCost || 0;
+        existing.totalCost += r.totalCost || 0;
+        existing.wipCount += r.wipCount || 0;
+      } else {
+        merged.set(key, {
+          _id: r._id,
+          totalQtyProduced: r.totalQtyProduced || 0,
+          totalExpectedRawUsed: r.totalExpectedRawUsed || 0,
+          totalRawMaterialCost: r.totalRawMaterialCost || 0,
+          totalPackagingMaterialCost: r.totalPackagingMaterialCost || 0,
+          totalOtherMaterialCost: r.totalOtherMaterialCost || 0,
+          totalCost: r.totalCost || 0,
+          wipCount: r.wipCount || 0,
+        });
+      }
+    }
+
+    const rows = Array.from(merged.values()).sort(
+      (a, b) => b.totalQtyProduced - a.totalQtyProduced,
+    );
+
+    // ---- 5) Lookup product names ----
     const ids = rows.map((r) => r._id).filter(Boolean);
     const products = await Product.find({ _id: { $in: ids } }).lean();
     const map = new Map(products.map((p: any) => [String(p._id), p]));
@@ -568,7 +651,7 @@ export const materialWipReportService = {
    * Packaging‑wise report
    */
   async packagingWise(filters: ReportFilters) {
-    const match = buildBaseMatch(filters);
+    const match = await buildBaseMatch(filters);
 
     const pipeline: any[] = [
       { $match: match },
@@ -581,10 +664,15 @@ export const materialWipReportService = {
       },
     ];
 
-    if (filters.packagingItemId) {
+    if (
+      filters.packagingItemId &&
+      mongoose.Types.ObjectId.isValid(filters.packagingItemId)
+    ) {
       pipeline.push({
         $match: {
-          "conversions.otherMaterialsUsed.itemId": new mongoose.Types.ObjectId(filters.packagingItemId),
+          "conversions.otherMaterialsUsed.itemId": new mongoose.Types.ObjectId(
+            filters.packagingItemId,
+          ),
         },
       });
     }

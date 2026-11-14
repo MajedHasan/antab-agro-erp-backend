@@ -593,6 +593,101 @@ async function buildPendingCostPreview(
 //                   MAIN SERVICE
 // =====================================================
 export const materialWipService = {
+
+  // ---------- listWip ----------
+  async listWip({
+    factoryId,
+    rawMaterialId,
+    status,
+    fromDate,
+    toDate,
+    q,
+    page = 1,
+    limit = 15,
+  }: any) {
+    const filter: any = {};
+
+    if (factoryId) filter.factoryId = factoryId;
+    if (rawMaterialId) filter.rawMaterialId = rawMaterialId;
+    if (status) filter.status = status;
+
+    if (fromDate || toDate) {
+      filter.date = {};
+      if (fromDate) filter.date.$gte = new Date(fromDate);
+      if (toDate) filter.date.$lte = new Date(toDate);
+    }
+
+    if (q) {
+      const regex = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      const rawMaterials = await RawMaterial.find(
+        { name: regex },
+        "_id",
+      ).lean();
+      const rawIds = rawMaterials.map((rm) => rm._id);
+
+      filter.$or = [
+        { rawMaterialId: { $in: rawIds } },
+        { _id: mongoose.Types.ObjectId.isValid(q) ? q : undefined },
+      ].filter(Boolean);
+    }
+
+    const skip = (num(page) - 1) * num(limit);
+
+    const [data, total, summaryResult] = await Promise.all([
+      MaterialWIP.find(filter)
+        .populate("rawMaterialId")
+        .populate("factoryId", "name code")
+        .populate("createdBy", "name")
+        .populate("approvedBy", "name")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(num(limit))
+        .lean(),
+      MaterialWIP.countDocuments(filter),
+      MaterialWIP.aggregate([
+        { $match: filter },
+        {
+          $group: {
+            _id: null,
+            totalRecords: { $sum: 1 },
+            totalIssuedQuantity: { $sum: "$issuedQuantity" },
+            totalConsumedQuantity: { $sum: "$consumedQuantity" },
+            totalRemainingQuantity: { $sum: "$remainingQuantity" },
+            activeCount: {
+              $sum: { $cond: [{ $eq: ["$status", "ACTIVE"] }, 1, 0] },
+            },
+            pendingCount: {
+              $sum: { $cond: [{ $eq: ["$status", "PENDING_APPROVAL"] }, 1, 0] },
+            },
+            approvedCount: {
+              $sum: { $cond: [{ $eq: ["$status", "APPROVED"] }, 1, 0] },
+            },
+            rejectedCount: {
+              $sum: { $cond: [{ $eq: ["$status", "REJECTED"] }, 1, 0] },
+            },
+          },
+        },
+      ]),
+    ]);
+
+    return {
+      data,
+      total,
+      page: num(page),
+      limit: num(limit),
+      summary: summaryResult[0] || {
+        totalRecords: 0,
+        totalIssuedQuantity: 0,
+        totalConsumedQuantity: 0,
+        totalRemainingQuantity: 0,
+        activeCount: 0,
+        pendingCount: 0,
+        approvedCount: 0,
+        rejectedCount: 0,
+      },
+    };
+  },
+
   // ---------- startWip ----------
   async startWip({ rawMaterialId, quantity, factoryId, userId }: any) {
     const session = await mongoose.startSession();
@@ -1163,9 +1258,12 @@ export const materialWipService = {
         draft.allowedWastageRawUsed,
       );
 
+      // ---------- Other materials availability check ----------
       for (const om of draft.otherMaterialsUsed) {
-        const StockModel = om.itemType === "RawMaterial" ? RawMaterialStock : PackagingStock;
-        const idField = om.itemType === "RawMaterial" ? "rawMaterialId" : "packagingItemId";
+        const StockModel =
+          om.itemType === "RawMaterial" ? RawMaterialStock : PackagingStock;
+        const idField =
+          om.itemType === "RawMaterial" ? "rawMaterialId" : "packagingItemId";
 
         const stock = await StockModel.findOne({
           [idField]: om.itemId,
@@ -1197,7 +1295,9 @@ export const materialWipService = {
 
       const mainConsumedCost = round2(wip.startCost - remaining * wip.unitCost);
       const mainPool = draft.materialPools.find(
-        (p) => p.itemType === "RawMaterial" && p.itemId === String(wip.rawMaterialId),
+        (p) =>
+          p.itemType === "RawMaterial" &&
+          p.itemId === String(wip.rawMaterialId),
       );
 
       if (mainPool) {
@@ -1226,8 +1326,10 @@ export const materialWipService = {
       for (const om of draft.otherMaterialsUsed) {
         const itemType = om.itemType;
         const itemId = String(om.itemId);
-        const StockModel = itemType === "RawMaterial" ? RawMaterialStock : PackagingStock;
-        const idField = itemType === "RawMaterial" ? "rawMaterialId" : "packagingItemId";
+        const StockModel =
+          itemType === "RawMaterial" ? RawMaterialStock : PackagingStock;
+        const idField =
+          itemType === "RawMaterial" ? "rawMaterialId" : "packagingItemId";
 
         const { totalCost } = await inventoryCostService.consume(
           itemType,
@@ -1321,7 +1423,9 @@ export const materialWipService = {
           line.totalCost = round2(line.totalCost + cost);
 
           if (pool.itemType === "PackagingItem") {
-            line.packagingMaterialCost = round2(line.packagingMaterialCost + cost);
+            line.packagingMaterialCost = round2(
+              line.packagingMaterialCost + cost,
+            );
           } else {
             line.rawMaterialCost = round2(line.rawMaterialCost + cost);
           }
@@ -1330,11 +1434,14 @@ export const materialWipService = {
 
       for (const line of productMap.values()) {
         line.unitCost =
-          line.quantityProduced > 0 ? round2(line.totalCost / line.quantityProduced) : 0;
+          line.quantityProduced > 0
+            ? round2(line.totalCost / line.quantityProduced)
+            : 0;
       }
 
       const productAllocations = Array.from(productMap.values());
 
+      // ---------- Finished goods stock + vouchers ----------
       const finishedGoodsVoucherLines: any[] = [];
       let totalFinishedGoodsCost = 0;
 
@@ -1372,12 +1479,27 @@ export const materialWipService = {
         });
       }
 
+      // =========================================================
+      // ⭐ FIX: Only create a return voucher when `remaining > 0`.
+      //    Fetch the WIP account ONCE, reuse in both vouchers.
+      // =========================================================
       const returnCost = round2(remaining * wip.unitCost);
-      const rawMaterialName =
-        (await RawMaterial.findById(wip.rawMaterialId).session(session).lean())?.name ||
-        String(wip.rawMaterialId);
+      const wipAccount = await getWipAccount(
+        String(wip.rawMaterialId),
+        session,
+      );
+
+      let returnVoucher: any = null;
 
       if (remaining > 0) {
+        const rawMaterialName =
+          (
+            await RawMaterial.findById(wip.rawMaterialId)
+              .session(session)
+              .lean()
+          )?.name || String(wip.rawMaterialId);
+
+        // 1) Put the material back on stock
         await RawMaterialStock.updateOne(
           { rawMaterialId: wip.rawMaterialId, factoryId: wip.factoryId },
           { $inc: { quantity: remaining } },
@@ -1399,37 +1521,43 @@ export const materialWipService = {
           },
           session,
         );
+
+        // 2) ONLY NOW create the return journal voucher
+        const rawMaterialAccount = await getRawMaterialAccount(
+          String(wip.rawMaterialId),
+          session,
+        );
+
+        returnVoucher = await voucherService.create(
+          {
+            voucherNo: `WIP-RET-${Date.now()}`,
+            date: new Date(),
+            type: "Journal",
+            narration: `Return remaining raw material – ${rawMaterialName} (${round3(
+              remaining,
+            )} ${wip.unit})`,
+            lines: [
+              {
+                accountId: rawMaterialAccount._id,
+                debit: returnCost,
+                credit: 0,
+                narration: `Raw material returned`,
+              },
+              {
+                accountId: wipAccount._id,
+                debit: 0,
+                credit: returnCost,
+                narration: `WIP reduction`,
+              },
+            ],
+            status: "Approved",
+            createdBy: userId,
+          },
+          session,
+        );
       }
 
-      const rawMaterialAccount = await getRawMaterialAccount(String(wip.rawMaterialId), session);
-      const wipAccount = await getWipAccount(String(wip.rawMaterialId), session);
-
-      const returnVoucher = await voucherService.create(
-        {
-          voucherNo: `WIP-RET-${Date.now()}`,
-          date: new Date(),
-          type: "Journal",
-          narration: `Return remaining raw material – ${rawMaterialName} (${round3(remaining)} ${wip.unit})`,
-          lines: [
-            {
-              accountId: rawMaterialAccount._id,
-              debit: returnCost,
-              credit: 0,
-              narration: `Raw material returned`,
-            },
-            {
-              accountId: wipAccount._id,
-              debit: 0,
-              credit: returnCost,
-              narration: `WIP reduction`,
-            },
-          ],
-          status: "Approved",
-          createdBy: userId,
-        },
-        session,
-      );
-
+      // ---------- Conversion voucher (unchanged shape) ----------
       const conversionLines: any[] = [
         ...finishedGoodsVoucherLines,
         {
@@ -1448,7 +1576,8 @@ export const materialWipService = {
 
         const actualCost =
           materialPools.find(
-            (m) => m.itemType === om.itemType && m.itemId === String(om.itemId),
+            (m) =>
+              m.itemType === om.itemType && m.itemId === String(om.itemId),
           )?.actualCost || 0;
 
         conversionLines.push({
@@ -1476,7 +1605,9 @@ export const materialWipService = {
         mainConsumedCost +
           materialPools
             .filter(
-              (m) => m.itemType === "RawMaterial" && m.itemId !== String(wip.rawMaterialId),
+              (m) =>
+                m.itemType === "RawMaterial" &&
+                m.itemId !== String(wip.rawMaterialId),
             )
             .reduce((sum, m) => sum + m.actualCost, 0),
       );
@@ -1487,6 +1618,7 @@ export const materialWipService = {
           .reduce((sum, m) => sum + m.actualCost, 0),
       );
 
+      // ---------- Push to conversion history ----------
       wip.conversions.push({
         products: productAllocations.map((p) => ({
           productId: p.productId,
@@ -1526,6 +1658,7 @@ export const materialWipService = {
         approvedAt: new Date(),
       });
 
+      // ---------- Finalize WIP ----------
       wip.pendingConversion = undefined;
       wip.status = "APPROVED";
       wip.approvedBy = userId;
@@ -1544,7 +1677,9 @@ export const materialWipService = {
       wip.otherMaterialCost = 0;
       wip.totalInputCost = round2(rawMaterialCost + packagingMaterialCost);
       wip.totalFinishedGoodsCost = totalFinishedGoodsCost;
-      wip.returnVoucherId = returnVoucher._id;
+
+      // ⭐ Only set the return voucher reference when one was actually created
+      wip.returnVoucherId = returnVoucher?._id;
       wip.conversionVoucherId = convVoucher._id;
 
       await wip.save({ session });
